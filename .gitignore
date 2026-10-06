@@ -1,13 +1,11 @@
-# Secrets: .env is untracked and never committed. Use .env.example for names only.
 .env
-.env.*
-!.env.example
-
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
-*.egg-info/
 dist/
 build/
+*.egg-info/
+.DS_Store
+data/.DS_Store
