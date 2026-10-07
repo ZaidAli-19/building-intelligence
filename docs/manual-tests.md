@@ -153,3 +153,32 @@ uv run python scripts/extract_sections.py
 ```
 
 Expected: prints "BNS corpus up to date — skipping" and "IPC corpus up to date — skipping". No records appended or overwritten.
+## Story 2.2 — MongoDB, Chunks, Embeddings, and Vector Index
+
+What it adds: an ingestion runner that loads the JSONL corpora into MongoDB as `sources`, `sections`, `chunks`, and `embeddings`, embeds every chunk with Voyage, and creates the Atlas `vector_index` on `embeddings.vector`.
+
+Prerequisite: Story 2.1 complete (both JSONL files present), and `.env` holds `MONGODB_URI` (Atlas cluster), `MONGODB_DB_NAME`, `VOYAGE_API_KEY`. First run takes roughly 35–40 minutes on a free Voyage key.
+
+### Run ingestion
+
+```bash
+uv run python -m building_with_rag.ingestion.ingest
+```
+
+Expected: steps 1–10 print in order. `sources=2`, `sections=858` with the supplied PDFs, `chunks` > 0, and `embeddings == chunks: True`. `bns:1 chunks` shows one or more with `all linked: True`, sample vector length 1024, index status `READY`, and the sample query for "punishment for theft" prints `chunk_id`, `section_id`, heading, and score (or `vector query pending — index not ready`).
+
+### Re-run (skip)
+
+```bash
+uv run python -m building_with_rag.ingestion.ingest
+```
+
+Expected: sources and sections report skipped, chunks report all skipped with 0 inserted/replaced, `Embeddings: 0 inserted, <n> skipped, 0 deleted` (no Voyage calls), and the existing `vector_index` is reused rather than recreated.
+
+### Missing MongoDB URI (failure)
+
+```bash
+MONGODB_URI= uv run python -m building_with_rag.ingestion.ingest
+```
+
+Expected: stops at step 1 with `MongoDB unavailable: MONGODB_URI is empty. Set it in .env and re-run.` Nothing is written and no Voyage call is made.
