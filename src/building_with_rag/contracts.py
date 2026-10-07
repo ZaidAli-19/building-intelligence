@@ -77,6 +77,19 @@ class Citation(BaseModel):
     source_pdf: str | None = None
 
 
+class Issue(BaseModel):
+    attempt: int
+    check: str  # citation_labels | claim_cited | support
+    detail: str
+
+
+class AttemptRecord(BaseModel):
+    attempt: int
+    status: str  # passed | failed | unjudged
+    chars: int = 0
+    latency_ms: int = 0
+
+
 class GenerationResult(BaseModel):
     text: str = ""
     model: str | None = None
@@ -88,6 +101,11 @@ class GenerationResult(BaseModel):
     provider: str = "openai-compatible"
     trace: dict = Field(default_factory=dict)
     context_outcome: str | None = None  # assembled | empty
+    confidence: str | None = None  # "high" | "low" | None (nothing could be judged)
+    issues: list[Issue] = Field(default_factory=list)
+    attempts: list[AttemptRecord] = Field(default_factory=list)
+    draft_answer: str = ""
+    low_confidence_reason: str = ""
 
 
 class QueryResult(BaseModel):
@@ -105,10 +123,16 @@ class QueryResult(BaseModel):
     hyde_hypothetical_text_debug: str | None = None
 
 
+class ChatFilters(BaseModel):
+    act: list[str] = Field(default_factory=list)
+    status: list[str] = Field(default_factory=list)
+
+
 class ChatRagOptions(BaseModel):
     pattern: Pattern = Pattern.SEMANTIC
     act: list[str] = Field(default_factory=list)
     status: list[str] = Field(default_factory=list)
+    filters: ChatFilters | None = None  # nested form sent by the Open WebUI Pipe
     access_level: list[str] = Field(default_factory=list)
     limit: int = Field(default=5, ge=1, le=20)
     required_acts: list[str] | None = None

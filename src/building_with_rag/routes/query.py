@@ -1,29 +1,34 @@
-"""Query endpoint: semantic is handled by retrieval; other modes use run_pattern."""
+"""Query endpoint: same retrieve -> answer path as chat, returned as one QueryResult."""
 
 from fastapi import APIRouter
 
 from building_with_rag.contracts import QueryRequest, QueryResult
-from building_with_rag.generation.answer import generate_answer
-from building_with_rag.registry import Pattern, run_pattern
-from building_with_rag.retrieval.semantic import run_semantic
+from building_with_rag.pipeline import answer_events, retrieve
+from building_with_rag.registry import Pattern
 
 router = APIRouter()
 
 _OUTCOME_MESSAGES = {
-    "answered": "Answer generated from the cited passages.",
+    "answered": "Answer generated from the cited passages; evidence check passed (confidence: high).",
     "insufficient_evidence": "The retrieved evidence is insufficient to answer; no answer given.",
     "unavailable": "Answer generation is unavailable; retrieved passages are still returned.",
-    "malformed": "The model output was invalid and was discarded; passages are still returned.",
+    "malformed": "No validated answer: the generated text failed the evidence check or was invalid; "
+    "passages are still returned.",
 }
+_LOW_CONFIDENCE = (
+    "The draft failed the evidence check (confidence: low); see generation.draft_answer and "
+    "generation.issues. It is not a validated answer."
+)
 
 
 @router.post("/v1/query")
 def query(request: QueryRequest) -> QueryResult:
-    if request.pattern == Pattern.SEMANTIC:
-        result = run_semantic(request)
-        if request.generate_answer:
-            result.generation = generate_answer(request.question, result.results)
-            result.message += " " + _OUTCOME_MESSAGES[result.generation.outcome]
-        return result
-    payload = run_pattern(request.pattern, request.question, request.caller_id)
-    return QueryResult(**payload)
+    result = retrieve(request)
+    if request.pattern == Pattern.SEMANTIC and request.generate_answer:
+        for kind, payload in answer_events(request.question, result):
+            if kind == "final":
+                result.generation = payload
+        generation = result.generation
+        sentence = _LOW_CONFIDENCE if generation.confidence == "low" else _OUTCOME_MESSAGES[generation.outcome]
+        result.message += " " + sentence
+    return result

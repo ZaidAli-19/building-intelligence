@@ -97,7 +97,7 @@ Expected: 422 validation error (question below min_length 1).
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-semantic", "messages": [{"role": "user", "content": "What is theft?"}]}'
+  -d '{"model": "rag-hybrid", "messages": [{"role": "user", "content": "What is theft?"}]}'
 ```
 
 Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contains `not implemented yet`.
@@ -107,7 +107,7 @@ Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contai
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-semantic", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
+  -d '{"model": "rag-hybrid", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
 ```
 
 Expected: SSE `data:` frames with `delta` role then content, ending with `data: [DONE]`.
@@ -127,7 +127,7 @@ Expected: 400 with `"type":"invalid_request_error"`, `"code":"model_not_found"`.
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-semantic", "messages": [{"role": "system", "content": "You are helpful."}]}'
+  -d '{"model": "rag-hybrid", "messages": [{"role": "system", "content": "You are helpful."}]}'
 ```
 
 Expected: 400 with `"code":"missing_user_message"`.
@@ -228,3 +228,29 @@ curl -s http://127.0.0.1:8000/v1/query \
 ```
 
 Expected: first returns HTTP 200, retrieval `"status":"ok"`, `generation.outcome` `"answered"` with non-empty `text`, `claims` with `evidence_labels`, and `citations` (e.g. `bns:303`, `BNS_2023`). Second returns `generation.outcome` `"insufficient_evidence"`, empty `text`, no claims or citations, with `results` still present. If the generation service is unreachable, slow, or rejects the key, `generation.outcome` is `"unavailable"` (HTTP 200, `results` still returned; see `generation.trace.error`). With `generate_answer` omitted, `generation` is null.
+
+
+## Story 3.2 — Streamed Answers with Confidence
+
+What it adds: `rag-semantic` on `/v1/chat/completions` now retrieves, streams a cited answer, validates it, and ends with a confidence footer, sharing one path with `/v1/query`.
+
+Prerequisite: API started as in Story 1.1 and `.env` holds the `GENERATION_*` values; when `CAPSTONE_API_KEY` is set, add `-H "Authorization: Bearer <key>"` to the chat commands.
+
+```bash
+# Success: streamed, validated answer
+curl -sN http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "rag-semantic", "stream": true, "messages": [{"role": "user", "content": "What is the punishment for theft under the BNS?"}]}'
+
+# Edge case: unsupported question
+curl -sN http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "rag-semantic", "stream": true, "messages": [{"role": "user", "content": "What is the GST rate on restaurant services?"}]}'
+
+# Failure: unknown model
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+Expected: first streams `DRAFT — checking evidence`, text with `[E1]`-style labels, then `Evidence check passed — confidence: high` and `Sources:` lines; a failed check shows `Check failed: … Retrying (attempt 2 of 2)…` or ends with `DRAFT — low confidence, not the final answer.`. Second ends with the insufficient-evidence sentence and no confidence. Both streams end with `finish_reason: "stop"` and `data: [DONE]`. Third returns 400 `model_not_found`. With `CAPSTONE_API_KEY` set, a missing or wrong bearer token returns 401 `invalid_api_key`. Other modes (e.g. `rag-hybrid`) on chat still return the `not_implemented` placeholder.

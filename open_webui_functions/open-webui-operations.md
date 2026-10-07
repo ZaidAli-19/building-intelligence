@@ -58,6 +58,16 @@ only allowed from `127.0.0.1`).
    save, and send a question. Hover the chip and click `×` to turn it off;
    re-enable it from the integrations menu next to `+`.
 
+## Reading answers
+
+- `DRAFT — checking evidence` precedes every streamed attempt. A draft cannot be retracted once streamed, so treat it as unchecked until the footer.
+- `Check failed: … Retrying (attempt 2 of 2)…` means the first attempt failed an evidence check and a second draft follows.
+- `Evidence check passed — confidence: high` plus `Sources:` marks the validated answer.
+- `DRAFT — low confidence, not the final answer.` means the final attempt failed; do not rely on it.
+- A line saying generation is unavailable means the provider failed; any text above it is an unchecked draft.
+
+The Pipe Valve `capstone_api_key` must equal `CAPSTONE_API_KEY` in `.env` when that is set (leave both empty to disable the check). After changing either `.py` file, re-paste it via **Function Menu → Edit** and save.
+
 ## Safe cleanup
 
 If you want to remove this incomplete local shell, first stop the server, then
