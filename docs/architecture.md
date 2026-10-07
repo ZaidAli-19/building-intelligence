@@ -42,7 +42,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-All modes return honest `not_implemented` placeholder results until their own stories add behavior.
+`semantic` is real on `/v1/query` (Story 2.3); chat for `rag-semantic` and every other mode still return honest `not_implemented` placeholders until their own stories add behavior.
 
 ## API contracts
 
@@ -118,3 +118,19 @@ Each record has 14 fields: `section_id`, `act`, `act_label`, `status`, `chapter`
 - **IPC footnotes**: Amendment footnotes and historical annotations are interleaved with section text and may appear as inline artifacts in section `text`.
 - **BNS chapter markers**: Chapter boundaries are detected from `CHAPTER <roman>` lines in the body text. The BNS index (pages 2–19) provides section headings; the correspondence table (pages 20–73) is skipped.
 - **Source-hash safety rule**: If a source PDF hash changes, the corpus for that act is regenerated as an atomic replacement. Records from different PDF versions are never mixed in one corpus file.
+
+## Semantic retrieval (Story 2.3)
+
+Module: `src/building_with_rag/retrieval/semantic.py`; `routes/query.py` routes `semantic` to it.
+
+Flow: validate (question trimmed, filters from known sets, `caller_id` = `WEBUI_DEMO_CALLER_ID`, no `required_acts`/`chapter`) → scope filters (`access_level` fixed to `public`; caller lists only narrow, as `$in`) → embed raw question (`voyage-3.5`, `input_type="query"`) → `$vectorSearch` on `embeddings`/`vector_index` with the filter inside the stage → resolve `chunks` (text) and `sections` (heading, source fields) → `QueryResult`. `numCandidates` = `limit*10` clamped to 50–200.
+
+Outcomes: `ok` (passages, in score order, no cutoff); `no_results` (HTTP 200) when filters match nothing; 503 `retrieval_not_ready` (missing credentials, index not queryable, empty/mismatched embeddings); 502 `retrieval_upstream_error` (Voyage/MongoDB failure); 422 for invalid input. `generate_answer` is accepted but ignored (noted in `trace.ignored`).
+
+Added optional `RetrievedChunk` fields: `chunk_index`, `act_label`, `status`, `chapter`, `chapter_title`, `section_number`, `source_pdf`, `source_sha256`, `needs_review`.
+
+Diagnostic (text truncated):
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "limit": 3}'   | jq '{status, trace, results: [.results[] | {chunk_id, section_id, act, heading, score, text: .text[:80]}]}'
+```

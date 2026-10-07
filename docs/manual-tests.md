@@ -30,7 +30,7 @@ curl -s http://127.0.0.1:8000/v1/query \
   -d '{"question": "What is theft?", "pattern": "semantic"}'
 ```
 
-Expected: `"status":"not_implemented"`, `"message":"Pattern 'semantic' is not implemented yet..."`.
+Expected (Story 2.3): `"status":"ok"` with ranked passages in `results` (requires `.env` credentials and Story 2.2 data; see `docs/architecture.md` for the truncated `jq` form).
 
 ### Query — hybrid
 
@@ -182,3 +182,28 @@ MONGODB_URI= uv run python -m building_with_rag.ingestion.ingest
 ```
 
 Expected: stops at step 1 with `MongoDB unavailable: MONGODB_URI is empty. Set it in .env and re-run.` Nothing is written and no Voyage call is made.
+
+## Story 2.3 — Semantic Retrieval
+
+What it adds: `POST /v1/query` with `pattern: "semantic"` embeds the question, runs a MongoDB vector search, and returns ranked source passages with a diagnostic `trace`.
+
+Prerequisite: Story 2.2 data loaded, `.env` holds `MONGODB_URI` and `VOYAGE_API_KEY`, API started as in Story 1.1.
+
+```bash
+# Success
+curl -s http://127.0.0.1:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "limit": 3}'
+
+# No match (IPC is repealed)
+curl -s http://127.0.0.1:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "filters": {"act": ["IPC_1860"], "status": ["in_force"]}}'
+
+# Invalid filter (failure)
+curl -s http://127.0.0.1:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "filters": {"act": {"$ne": "x"}}}'
+```
+
+Expected: first returns `"pattern":"semantic"`, `"status":"ok"`, at most 3 `results` in descending `score` order with `chunk_id`, `section_id` (e.g. `bns:303`), `act`, `heading`, `text`, and a populated `trace`. Second returns HTTP 200, `"status":"no_results"`, empty `results`. Third returns 422 validation error. With an empty `VOYAGE_API_KEY` the query returns 503 `retrieval_not_ready`, not `no_results`.
