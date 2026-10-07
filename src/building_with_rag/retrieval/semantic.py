@@ -145,9 +145,6 @@ def _run(request: QueryRequest) -> QueryResult:
     limit = request.limit
     candidates = num_candidates(limit)
     mongo_filter = _mongo_filter(filters)
-    ignored = []
-    if request.generate_answer:
-        ignored.append("generate_answer: semantic mode generates no answer; generation is null.")
     trace = {
         "mode": "semantic",
         "query": request.question,
@@ -162,7 +159,7 @@ def _run(request: QueryRequest) -> QueryResult:
         "filters": filters,
         "caller_id": get_settings().webui_demo_caller_id,
         "result_count": 0,
-        "ignored": ignored,
+        "ignored": [],
         "unresolved_hits": 0,
     }
 

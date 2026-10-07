@@ -125,7 +125,7 @@ Module: `src/building_with_rag/retrieval/semantic.py`; `routes/query.py` routes 
 
 Flow: validate (question trimmed, filters from known sets, `caller_id` = `WEBUI_DEMO_CALLER_ID`, no `required_acts`/`chapter`) → scope filters (`access_level` fixed to `public`; caller lists only narrow, as `$in`) → embed raw question (`voyage-3.5`, `input_type="query"`) → `$vectorSearch` on `embeddings`/`vector_index` with the filter inside the stage → resolve `chunks` (text) and `sections` (heading, source fields) → `QueryResult`. `numCandidates` = `limit*10` clamped to 50–200.
 
-Outcomes: `ok` (passages, in score order, no cutoff); `no_results` (HTTP 200) when filters match nothing; 503 `retrieval_not_ready` (missing credentials, index not queryable, empty/mismatched embeddings); 502 `retrieval_upstream_error` (Voyage/MongoDB failure); 422 for invalid input. `generate_answer` is accepted but ignored (noted in `trace.ignored`).
+Outcomes: `ok` (passages, in score order, no cutoff); `no_results` (HTTP 200) when filters match nothing; 503 `retrieval_not_ready` (missing credentials, index not queryable, empty/mismatched embeddings); 502 `retrieval_upstream_error` (Voyage/MongoDB failure); 422 for invalid input. `generate_answer` triggers answer generation (Story 3.1).
 
 Added optional `RetrievedChunk` fields: `chunk_index`, `act_label`, `status`, `chapter`, `chapter_title`, `section_number`, `source_pdf`, `source_sha256`, `needs_review`.
 
@@ -134,3 +134,13 @@ Diagnostic (text truncated):
 ```bash
 curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "limit": 3}'   | jq '{status, trace, results: [.results[] | {chunk_id, section_id, act, heading, score, text: .text[:80]}]}'
 ```
+
+## Context and answer boundaries (Story 3.1)
+
+Flow (`POST /v1/query`, `semantic`, `generate_answer: true`): retrieval result → bounded labelled context (`generation/context.py`: at most 5 passages and 12,000 characters, labels `E1`…, passages never cut) → one `POST {GENERATION_API_BASE_URL}/chat/completions` call (`generation/answer.py`, `httpx`, 90 s timeout, no retries) → strict JSON parse → citations resolved from the supplied context only. No second retrieval.
+
+Outcomes in `QueryResult.generation.outcome`: `answered` (non-empty `text`, `claims`, `citations`, `supporting_passages`), `insufficient_evidence` (also when context is empty; model skipped), `unavailable` (missing settings, timeout, connection error, non-2xx), `malformed` (non-JSON, unknown label, rule violation, missing `choices`). All non-answered outcomes return HTTP 200 with empty `text`; retrieval `results` and `status` are unchanged.
+
+Added optional `GenerationResult` fields: `outcome`, `claims` (`text`, `evidence_labels`), `citations` (`label`, `chunk_id`, `section_id`, `act`, `heading`, `chapter`, `section_number`, `source_pdf`), `supporting_passages`, `provider`, `trace` (labels→chunk_id, selected/omitted counts, characters, latency; no prompt, vectors, or secrets), `context_outcome` (`assembled`|`empty`).
+
+Rules: evidence is untrusted source text, never instructions. No claims of current legal applicability beyond the supplied BNS/IPC documents. Chat and streaming stay placeholders until Story 3.2.

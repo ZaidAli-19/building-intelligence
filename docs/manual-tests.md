@@ -207,3 +207,24 @@ curl -s http://127.0.0.1:8000/v1/query \
 ```
 
 Expected: first returns `"pattern":"semantic"`, `"status":"ok"`, at most 3 `results` in descending `score` order with `chunk_id`, `section_id` (e.g. `bns:303`), `act`, `heading`, `text`, and a populated `trace`. Second returns HTTP 200, `"status":"no_results"`, empty `results`. Third returns 422 validation error. With an empty `VOYAGE_API_KEY` the query returns 503 `retrieval_not_ready`, not `no_results`.
+
+
+## Story 3.1 — Grounded Answer Generation
+
+What it adds: `POST /v1/query` with `pattern: "semantic"` and `generate_answer: true` also returns `generation`, a non-streaming answer built only from the retrieved passages, with resolved citations.
+
+Prerequisite: Story 2.3 working, API started as in Story 1.1, `.env` holds `GENERATION_API_BASE_URL`, `GENERATION_API_KEY`, and `GENERATION_MODEL_NAME`. Restart the API after any `.env` change.
+
+```bash
+# Success
+curl -s http://127.0.0.1:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the punishment for theft under the BNS?", "pattern": "semantic", "limit": 5, "generate_answer": true}'
+
+# Unsupported question (edge case)
+curl -s http://127.0.0.1:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the GST rate on restaurant services?", "pattern": "semantic", "limit": 5, "generate_answer": true}'
+```
+
+Expected: first returns HTTP 200, retrieval `"status":"ok"`, `generation.outcome` `"answered"` with non-empty `text`, `claims` with `evidence_labels`, and `citations` (e.g. `bns:303`, `BNS_2023`). Second returns `generation.outcome` `"insufficient_evidence"`, empty `text`, no claims or citations, with `results` still present. If the generation service is unreachable, slow, or rejects the key, `generation.outcome` is `"unavailable"` (HTTP 200, `results` still returned; see `generation.trace.error`). With `generate_answer` omitted, `generation` is null.
