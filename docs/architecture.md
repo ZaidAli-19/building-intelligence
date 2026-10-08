@@ -43,7 +43,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-`semantic` (Stories 2.3, 3.2), `hybrid` (Story 4.1), and `hybrid-reranked` (Story 4.2) are real on `/v1/query` and chat; every other mode returns an honest `not_implemented` placeholder until its own story adds behavior.
+`semantic` (Stories 2.3, 3.2), `hybrid` (Story 4.1), and `hybrid-reranked` (Story 4.2), and `structured` (Story 5.1) are real on `/v1/query` and chat; every other mode returns an honest `not_implemented` placeholder until its own story adds behavior.
 
 ## API contracts
 
@@ -74,7 +74,7 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real retrieval (and optional answer) for `semantic`, `hybrid`, and `hybrid-reranked`, a `run_pattern` placeholder for other modes, via the shared `retrieve` path.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real retrieval (and optional answer) for `semantic`, `hybrid`, `hybrid-reranked`, and `structured`, a `run_pattern` placeholder for other modes, via the shared `retrieve` path.
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
@@ -149,7 +149,7 @@ Rules: evidence is untrusted source text, never instructions. No claims of curre
 
 ## Streamed answers and confidence (Story 3.2)
 
-Shared path (`pipeline.py`): `retrieve(request)` (semantic → `run_semantic`, hybrid → `run_hybrid`, hybrid-reranked → `run_hybrid_reranked`, other modes → placeholder) → `answer_events(question, retrieval)` → final `GenerationResult`. `/v1/query` drains the events and attaches the result; chat forwards `text`/`notice` events as SSE and renders the footer from the same final result. One request = one generation/validation operation; retrieval and context assembly are never streamed, and retrieval errors are raised before streaming (OpenAI-style envelope on chat).
+Shared path (`pipeline.py`): `retrieve(request)` (semantic → `run_semantic`, hybrid → `run_hybrid`, hybrid-reranked → `run_hybrid_reranked`, structured → `run_structured`, other modes → placeholder) → `answer_events(question, retrieval)` → final `GenerationResult`. `/v1/query` drains the events and attaches the result; chat forwards `text`/`notice` events as SSE and renders the footer from the same final result. One request = one generation/validation operation; retrieval and context assembly are never streamed, and retrieval errors are raised before streaming (OpenAI-style envelope on chat).
 
 Event flow per attempt: stream plain text with inline `[E1]` labels (the first ~22 characters are buffered so `INSUFFICIENT_EVIDENCE: <reason>` is never shown as an answer) → checks → pass, or retry once. `MAX_ATTEMPTS = 2`. Checks, in order: `citation_labels` (only supplied labels), `claim_cited` (every sentence/bullet cited, text non-empty), `support` (one non-streamed validator call judges each claim against its cited passage). Citations are never stripped or rewritten.
 
@@ -213,4 +213,27 @@ Diagnostic (text truncated):
 curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
   -d '{"question":"<q>","pattern":"hybrid-reranked","limit":5}' \
   | jq '{status, t: .trace.rerank, r: [(.results[]|.+{kept:true}), (.omitted_candidates[]|.+{kept:false})] | map({section_id, kept, fr: .fused_rank, fs: .fused_score, rr: .rerank_rank, rs: .rerank_score, why: .omitted_reason, text: .text[:50]}) | sort_by(.fr)}'
+```
+
+
+## Structured exact retrieval (Story 5.1)
+
+Mode `structured` (`rag-structured`), chosen explicitly; no automatic routing, no fallback to or from other modes. `retrieval/structured.py`: `classify(question, chapter)` → validated `StructuredSignals` → (exact lookup only) one read-only `find_one` on `sections` → `QueryResult`. No LLM, Voyage, embedding, vector or keyword index is used; only `MONGODB_URI` is needed, and only when a lookup actually runs.
+
+`StructuredSignals` (`contracts.py`, `extra="forbid"`): `intent` (`exact_lookup`|`filter`|`aggregation`|None), `act` (`BNS_2023`|`IPC_1860`|None), `section_number` (1–999), `chapter`, `status` (`ok`|`recommendation`|`clarification_needed`), `reason`. `ok` only for a complete exact lookup.
+
+Exact-input contract: only the classifier's validated `act`, `section_number`, an optional validated `chapter` (1–40 characters of letters, digits, spaces, `.`, `-`; invalid → 422 `unsupported_option`, never parsed from the question) and the server-fixed filters (`access_level` = `public`; caller `status` list only narrows) may reach MongoDB. Raw question text and request operators never enter the predicate. Classified: aggregation ("how many", "count", "total number") and filter ("list", "all sections", "which sections", "sections in/under") are recognised but not executed (`recommendation`); `section N` / `sec. N` / `s. N` / `§N` plus exactly one act token (BNS, IPC, full act names) is `ok`; a missing act, both acts, several numbers, `103A`-style or out-of-range numbers are `clarification_needed` (acts are never guessed); anything else is a `recommendation` to use semantic or hybrid. A caller `act` filter that excludes the classified act is `clarification_needed`. `required_acts` is rejected; `chapter` is accepted.
+
+Result: `QueryResult.status` is `ok`, `not_found`, `clarification_needed` or `recommendation` (HTTP 200). `ok` returns one `RetrievedChunk` with `chunk_id = section_id`, `score = 1.0` (an exact match, not a similarity) and the section text and source fields. `not_found` says only that this corpus has no such record. Missing `MONGODB_URI` → 503 `retrieval_not_ready`; MongoDB failure → 502 `retrieval_upstream_error`. `trace`: `mode`, `signals`, `mongodb_called`, `collection`, `filters`, `caller_id`, `result_count`, and for `ok` a `record` (`section_id`, `status`, `source_status_version`).
+
+Answer boundary: retrieval returns the exact record. An explanation is produced only through the existing grounded-answer path when requested (`generate_answer: true`, or chat). `not_found`, `clarification_needed` and `recommendation` never produce an answer or a model call: `/v1/query` leaves `generation` unset and chat streams the message as plain text. `status` and `source_status_version` are source metadata, not current legal applicability. A section longer than the 12,000-character context cap yields `insufficient_evidence` when an answer is requested; direct inspection still returns it.
+
+Limitations: integer section numbers only (no `103A`); no multi-section or cross-act comparison; filter and aggregation questions are recognised but not executed; 11 IPC sections (4, 5, 18, 34, 40, 75, 161–165) are absent from `sections`; rule-based phrasing misses variants it does not list.
+
+Diagnostic (text truncated):
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"What does BNS section 103 say?","pattern":"structured"}' \
+  | jq '{status, t: (.trace | {signals, mongodb_called, record}), r: [.results[] | {section_id, act, status, text: .text[:60]}]}'
 ```

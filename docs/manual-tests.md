@@ -2,7 +2,7 @@
 
 ## Story 1.1 — Architecture and Project Seed
 
-What it adds: FastAPI project seed with health, query, model-listing, and OpenAI-compatible chat endpoints — all returning honest `not_implemented` placeholders.
+What it adds: FastAPI project seed with health, query, model-listing, and OpenAI-compatible chat endpoints — originally all returning `not_implemented` placeholders (every mode is real since Story 5.2).
 
 Prerequisite: start the API — `uv run uvicorn building_with_rag.app:app --host 127.0.0.1 --port 8000`
 
@@ -30,57 +30,33 @@ curl -s http://127.0.0.1:8000/v1/query \
   -d '{"question": "What is theft?", "pattern": "semantic"}'
 ```
 
-Expected (Story 2.3): `"status":"ok"` with ranked passages in `results` (requires `.env` credentials and Story 2.2 data; see `docs/architecture.md` for the truncated `jq` form).
+Expected: `"status":"ok"` with ranked passages (see Story 2.3 below); needs Story 2.2 ingestion and `.env` credentials, otherwise HTTP 503.
 
 ### Query — hybrid
 
 ```bash
 curl -s http://127.0.0.1:8000/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "criminal breach of trust", "pattern": "hybrid", "limit": 5}'
+  -d '{"question": "criminal breach of trust", "pattern": "hybrid", "limit": 3}' \
+  | jq '{status, r: [.results[] | {section_id, score, sr: .semantic_rank, kr: .keyword_rank, fr: .fused_rank}]}'
 ```
 
-Expected (Story 4.1): `"pattern":"hybrid"`, `"status":"ok"`, fused `results` with `semantic_rank`/`keyword_rank`/`fused_rank` (requires the keyword index; see Story 4.1).
+Expected: `"status":"ok"` with fused results (real since Story 4.1; needs `chunk_text_index`, else 503).
 
 ### Query — hybrid-reranked
 
 ```bash
 curl -s http://127.0.0.1:8000/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "hybrid-reranked", "limit": 5}'
+  -d '{"question": "What is theft?", "pattern": "hybrid-reranked", "limit": 3}' \
+  | jq '{status, t: .trace.rerank, r: [.results[] | {section_id, fr: .fused_rank, rr: .rerank_rank}]}'
 ```
 
-Expected (Story 4.2): `"pattern":"hybrid-reranked"`, `"status":"ok"`, `results` ordered by `rerank_rank` with `omitted_candidates` for the rest (requires `RERANK_API_KEY`; see Story 4.2).
+Expected: `"status":"ok"` with re-ranked results (real since Story 4.2; needs `RERANK_API_KEY`, else 503 `retrieval_not_ready`).
 
-### Query — structured
+### Query — decomposition / hyde
 
-```bash
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "structured"}'
-```
-
-Expected: `"status":"not_implemented"`, message references `structured`.
-
-### Query — decomposition
-
-```bash
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "decomposition"}'
-```
-
-Expected: `"status":"not_implemented"`, message references `decomposition`.
-
-### Query — hyde
-
-```bash
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "hyde"}'
-```
-
-Expected: `"status":"not_implemented"`, message references `hyde`.
+Real since Story 5.2; see the Story 5.2 section (needs `.env` with generation settings).
 
 ### Query — empty question (failure)
 
@@ -97,17 +73,17 @@ Expected: 422 validation error (question below min_length 1).
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}]}'
+  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What does section 103 say?"}]}'
 ```
 
-Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contains `not implemented yet`.
+Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content is the structured clarification (act is missing); no credentials or network needed.
 
 ### Chat completions — streaming
 
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
+  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What does section 103 say?"}], "stream": true}'
 ```
 
 Expected: SSE `data:` frames with `delta` role then content, ending with `data: [DONE]`.
@@ -127,7 +103,7 @@ Expected: 400 with `"type":"invalid_request_error"`, `"code":"model_not_found"`.
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-structured", "messages": [{"role": "system", "content": "You are helpful."}]}'
+  -d '{"model": "rag-semantic", "messages": [{"role": "system", "content": "You are helpful."}]}'
 ```
 
 Expected: 400 with `"code":"missing_user_message"`.
@@ -153,158 +129,217 @@ uv run python scripts/extract_sections.py
 ```
 
 Expected: prints "BNS corpus up to date — skipping" and "IPC corpus up to date — skipping". No records appended or overwritten.
-## Story 2.2 — MongoDB, Chunks, Embeddings, and Vector Index
-
-What it adds: an ingestion runner that loads the JSONL corpora into MongoDB as `sources`, `sections`, `chunks`, and `embeddings`, embeds every chunk with Voyage, and creates the Atlas `vector_index` on `embeddings.vector`.
-
-Prerequisite: Story 2.1 complete (both JSONL files present), and `.env` holds `MONGODB_URI` (Atlas cluster), `MONGODB_DB_NAME`, `VOYAGE_API_KEY`. First run takes roughly 35–40 minutes on a free Voyage key.
-
-### Run ingestion
-
-```bash
-uv run python -m building_with_rag.ingestion.ingest
-```
-
-Expected: steps 1–10 print in order. `sources=2`, `sections=858` with the supplied PDFs, `chunks` > 0, and `embeddings == chunks: True`. `bns:1 chunks` shows one or more with `all linked: True`, sample vector length 1024, index status `READY`, and the sample query for "punishment for theft" prints `chunk_id`, `section_id`, heading, and score (or `vector query pending — index not ready`).
-
-### Re-run (skip)
-
-```bash
-uv run python -m building_with_rag.ingestion.ingest
-```
-
-Expected: sources and sections report skipped, chunks report all skipped with 0 inserted/replaced, `Embeddings: 0 inserted, <n> skipped, 0 deleted` (no Voyage calls), and the existing `vector_index` is reused rather than recreated.
-
-### Missing MongoDB URI (failure)
-
-```bash
-MONGODB_URI= uv run python -m building_with_rag.ingestion.ingest
-```
-
-Expected: stops at step 1 with `MongoDB unavailable: MONGODB_URI is empty. Set it in .env and re-run.` Nothing is written and no Voyage call is made.
 
 ## Story 2.3 — Semantic Retrieval
 
-What it adds: `POST /v1/query` with `pattern: "semantic"` embeds the question, runs a MongoDB vector search, and returns ranked source passages with a diagnostic `trace`.
+What it adds: `pattern: "semantic"` on `POST /v1/query` embeds the question, runs a MongoDB vector search, and returns ranked source passages.
 
-Prerequisite: Story 2.2 data loaded, `.env` holds `MONGODB_URI` and `VOYAGE_API_KEY`, API started as in Story 1.1.
+Prerequisite: Story 2.2 ingestion done, `MONGODB_URI` and `VOYAGE_API_KEY` set in `.env`, API started as in Story 1.1.
 
 ```bash
 # Success
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "limit": 3}'
-
-# No match (IPC is repealed)
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "filters": {"act": ["IPC_1860"], "status": ["in_force"]}}'
-
-# Invalid filter (failure)
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "filters": {"act": {"$ne": "x"}}}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "limit": 3}' \
+  | jq '{status, trace, results: [.results[] | {chunk_id, section_id, act, heading, score, text: .text[:80]}]}'
 ```
 
-Expected: first returns `"pattern":"semantic"`, `"status":"ok"`, at most 3 `results` in descending `score` order with `chunk_id`, `section_id` (e.g. `bns:303`), `act`, `heading`, `text`, and a populated `trace`. Second returns HTTP 200, `"status":"no_results"`, empty `results`. Third returns 422 validation error. With an empty `VOYAGE_API_KEY` the query returns 503 `retrieval_not_ready`, not `no_results`.
+Expected: `status: "ok"`, `pattern: "semantic"`, 1–3 results in non-increasing `score` order, populated `trace` (mode, embedding, index, limit, num_candidates, filters, result_count).
 
+```bash
+# No results (IPC is repealed, so the filters match nothing)
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "filters": {"act": ["IPC_1860"], "status": ["in_force"]}}' \
+  | jq '{status, message, results: (.results | length)}'
+```
 
+Expected: HTTP 200, `status: "no_results"`, 0 results.
+
+```bash
+# Rejected filter (operator-shaped value)
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question": "What is theft?", "pattern": "semantic", "filters": {"act": {"$ne": "x"}}}'
+
+# Rejected limit (max 20)
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question": "What is theft?", "pattern": "semantic", "limit": 21}'
+```
+
+Expected: `422` for each. With an empty `VOYAGE_API_KEY`, the success request returns HTTP 503 (`retrieval_not_ready`), not `no_results`.
 ## Story 3.1 — Grounded Answer Generation
 
-What it adds: `POST /v1/query` with `pattern: "semantic"` and `generate_answer: true` also returns `generation`, a non-streaming answer built only from the retrieved passages, with resolved citations.
+What it adds: `generate_answer: true` on semantic `POST /v1/query` fills `generation` with a grounded, non-streaming answer and resolved citations, or an honest `insufficient_evidence`, `unavailable`, or `malformed` outcome.
 
-Prerequisite: Story 2.3 working, API started as in Story 1.1, `.env` holds `GENERATION_API_BASE_URL`, `GENERATION_API_KEY`, and `GENERATION_MODEL_NAME`. Restart the API after any `.env` change.
+Prerequisite: Story 2.3 prerequisites, plus `GENERATION_API_BASE_URL` and `GENERATION_API_KEY` set in `.env` (OpenAI-compatible LiteLLM proxy; `GENERATION_MODEL_NAME` defaults to `gpt-4o-mini`). Restart the API after changing `.env`.
 
 ```bash
-# Success
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the punishment for theft under the BNS?", "pattern": "semantic", "limit": 5, "generate_answer": true}'
-
-# Unsupported question (edge case)
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the GST rate on restaurant services?", "pattern": "semantic", "limit": 5, "generate_answer": true}'
+# Answerable question
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question": "What is the punishment for theft under the BNS?", "pattern": "semantic", "limit": 5, "generate_answer": true}' \
+  | jq '{status, g: (.generation | {outcome, model, provider, context_outcome, text: (.text[:300]), claims: [.claims[] | {t: .text[:80], e: .evidence_labels}], citations: [.citations[] | {label, chunk_id, section_id, act, heading}], trace}), ctx: [.results[] | {chunk_id, section_id, act, score}]}'
 ```
 
-Expected: first returns HTTP 200, retrieval `"status":"ok"`, `generation.outcome` `"answered"` with non-empty `text`, `claims` with `evidence_labels`, and `citations` (e.g. `bns:303`, `BNS_2023`). Second returns `generation.outcome` `"insufficient_evidence"`, empty `text`, no claims or citations, with `results` still present. If the generation service is unreachable, slow, or rejects the key, `generation.outcome` is `"unavailable"` (HTTP 200, `results` still returned; see `generation.trace.error`). With `generate_answer` omitted, `generation` is null.
+Expected: `generation.outcome: "answered"`, non-empty `text`, each claim has evidence labels, every citation `chunk_id` appears in `ctx` and `section_id` prefix matches `act` (`bns:` for `BNS_2023`).
 
+```bash
+# Unsupported question (insufficient evidence)
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question": "What is the GST rate on restaurant services?", "pattern": "semantic", "limit": 5, "generate_answer": true}' \
+  | jq '{status, g: (.generation | {outcome, text, claims: (.claims | length), citations: (.citations | length)}), results: (.results | length)}'
+```
+
+Expected: HTTP 200, `generation.outcome: "insufficient_evidence"`, empty `text`, 0 claims, 0 citations; retrieved `results` are still returned.
+
+```bash
+# Without generate_answer: no model call
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question": "What is theft?", "pattern": "semantic", "limit": 3}' \
+  | jq '{status, generation, results: (.results | length)}'
+```
+
+Expected: `status: "ok"`, `generation: null`, 1–3 results.
+
+Unavailable check: set `GENERATION_API_KEY=` empty in `.env`, restart the API, and rerun the first command. Expected: HTTP 200, `generation.outcome: "unavailable"`, empty `text`, `results` still present.
 
 ## Story 3.2 — Streamed Answers with Confidence
 
-What it adds: `rag-semantic` on `/v1/chat/completions` now retrieves, streams a cited answer, validates it, and ends with a confidence footer, sharing one path with `/v1/query`.
+What it adds: semantic chat streams a DRAFT-prefixed answer, then a confidence/sources footer; `/v1/query` returns the same result with `confidence`, `issues`, `attempts`.
 
-Prerequisite: API started as in Story 1.1 and `.env` holds the `GENERATION_*` values; when `CAPSTONE_API_KEY` is set, add `-H "Authorization: Bearer <key>"` to the chat commands.
+Prerequisite: Story 3.1 prerequisites. Optional `CAPSTONE_API_KEY` (chat then needs `Authorization: Bearer <key>`).
 
 ```bash
-# Success: streamed, validated answer
-curl -sN http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "rag-semantic", "stream": true, "messages": [{"role": "user", "content": "What is the punishment for theft under the BNS?"}]}'
-
-# Edge case: unsupported question
-curl -sN http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "rag-semantic", "stream": true, "messages": [{"role": "user", "content": "What is the GST rate on restaurant services?"}]}'
-
-# Failure: unknown model
-curl -s http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
+Q='What is the punishment for theft under the BNS?'
+curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" \
+  -d "{\"model\":\"rag-semantic\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"$Q\"}]}" \
+  | grep '^data: {' | sed 's/^data: //' | jq -rj '.choices[0].delta.content // empty' | head -c 1500
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d "{\"question\":\"$Q\",\"pattern\":\"semantic\",\"generate_answer\":true}" \
+  | jq '{status, g: (.generation | {outcome, confidence, attempts, issues, citations: [.citations[] | {label, section_id}]})}'
 ```
 
-Expected: first streams `DRAFT — checking evidence`, text with `[E1]`-style labels, then `Evidence check passed — confidence: high` and `Sources:` lines; a failed check shows `Check failed: … Retrying (attempt 2 of 2)…` or ends with `DRAFT — low confidence, not the final answer.`. Second ends with the insufficient-evidence sentence and no confidence. Both streams end with `finish_reason: "stop"` and `data: [DONE]`. Third returns 400 `model_not_found`. With `CAPSTONE_API_KEY` set, a missing or wrong bearer token returns 401 `invalid_api_key`. Other modes (e.g. `rag-structured`) on chat still return the `not_implemented` placeholder.
+Expected: stream shows `DRAFT — checking evidence`, labelled answer, `confidence: high`, `Sources:`; `/v1/query` agrees (`answered`, `high`, same citations).
 
+Unsupported: use "What is the GST rate on restaurant services?" — chat ends with the insufficient-evidence sentence (no confidence); `/v1/query` shows `insufficient_evidence` with `results` intact.
+
+Stream shape: `curl -sN ... | grep -c '^data: '` — role chunk, content chunks, `finish_reason: "stop"`, `data: [DONE]` last. With `CAPSTONE_API_KEY` set, a wrong Bearer → 401 `invalid_api_key`.
+
+Offline: `uv run pytest tests/test_streamed_confidence.py`
 
 ## Story 4.1 — Hybrid Search
 
-What it adds: `pattern: "hybrid"` (`rag-hybrid`) fuses Atlas Search keyword hits on chunk text with the semantic vector hits by Reciprocal Rank Fusion.
+What it adds: `rag-hybrid` / `pattern: "hybrid"` fuses Atlas Search keyword hits on `chunks.text` with semantic hits (RRF, k=60).
 
-Prerequisite: Story 2.3 working, API started as in Story 1.1; create the keyword index once with the first command (waits until `READY`).
-
-```bash
-uv run python -m building_with_rag.ingestion.keyword_index
-
-# Success
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "criminal breach of trust", "pattern": "hybrid", "limit": 5}'
-
-# Edge case: filters leave nothing (IPC is repealed)
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "criminal breach of trust", "pattern": "hybrid", "filters": {"act": ["IPC_1860"], "status": ["in_force"]}}'
-
-# Chat with the hybrid model
-curl -s http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid", "stream": true, "messages": [{"role": "user", "content": "What is criminal breach of trust?"}]}'
-```
-
-Expected: the index command ends with `chunk_text_index: READY (queryable)` (a second run says `reused`). Success returns `"pattern":"hybrid"`, `"status":"ok"`, at most 5 results in non-increasing `score` where `score == fused_score`, each with `semantic_rank` and/or `keyword_rank` and `fused_rank`, and `trace` showing `semantic`, `keyword`, `fusion`, and `contribution`. Edge case returns HTTP 200 with `"status":"no_results"` and empty `results`. Chat streams the same DRAFT/confidence/Sources text as `rag-semantic` and ends with `data: [DONE]`. If the keyword index is missing, hybrid returns 503 `retrieval_not_ready` naming the index command. `structured`, `decomposition`, and `hyde` still return `not_implemented`.
-
-
-## Story 4.2 — Hybrid Re-ranking
-
-What it adds: `pattern: "hybrid-reranked"` (`rag-hybrid-reranked`) re-scores a bounded set of hybrid candidates with one re-ranking call, so the answer is built from the passages the re-ranker ranks highest.
-
-Prerequisite: Story 4.1 working (including the keyword index), `.env` holds `RERANK_API_KEY`, API started as in Story 1.1.
+Prerequisite: Story 3.2 prerequisites; Atlas Search available. Voyage free tier is 3 requests/minute — space runs ~25 s apart.
 
 ```bash
-# Success
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the difference between culpable homicide and murder?", "pattern": "hybrid-reranked", "limit": 5}'
-
-# Chat with the re-ranked model
-curl -sN http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid-reranked", "stream": true, "messages": [{"role": "user", "content": "What is the punishment for theft under the BNS?"}]}'
-
-# Failure: with RERANK_API_KEY empty (restart the API after changing .env)
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "hybrid-reranked"}'
+uv run python -m building_with_rag.ingestion.keyword_index   # twice: created, then reusing
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"criminal breach of trust","pattern":"hybrid","limit":5}' \
+  | jq '{status, t: (.trace | {semantic, keyword, fusion, contribution}), r: [.results[] | {section_id, score, sr: .semantic_rank, kr: .keyword_rank, fr: .fused_rank, text: .text[:60]}]}'
 ```
 
-Expected: success returns `"status":"ok"`, at most `min(limit, RERANK_RETURN_LIMIT)` `results` with `rerank_rank` 1..n and `score == rerank_score`, each keeping `fused_rank`/`fused_score`; `omitted_candidates` hold the rest with `omitted_reason` (`not_sent_to_reranker` or `below_return_limit`); `trace.rerank` shows the counts and `latency_ms`. Chat streams DRAFT/confidence/`Sources:` text and ends with `data: [DONE]`. The failure returns HTTP 503 `retrieval_not_ready` ("RERANK_API_KEY is not set; hybrid-reranked requires it."), not `no_results`. A provider failure returns 502 `retrieval_upstream_error`. `structured`, `decomposition`, and `hyde` still return `not_implemented`.
+Expected: index ends `chunk_text_index: READY (queryable)`; `status: ok`, ≤ `limit` results, `score` non-increasing and equal to fused score, each result has `sr` and/or `kr`.
+
+Compare modes: run one paraphrased and one exact-term question with `"pattern":"semantic"` and `"hybrid"`, `generate_answer: true`, `limit: 5`; note section order, contributing route(s), and `generation.outcome`.
+
+Chat: `rag-hybrid` streams DRAFT, confidence and `Sources:` as `rag-semantic` does; `rag-decomposition` is real since Story 5.2.
+
+Failure: with `chunk_text_index` missing, hybrid → 503 `retrieval_not_ready` (names the keyword-index command) while semantic stays `ok`.
+
+Offline: `uv run pytest tests/test_hybrid_retrieval.py`
+
+## Story 4.2 — Hybrid re-ranking
+
+Prerequisite: Story 4.1 prerequisites plus `RERANK_API_KEY` in `.env`. Space Voyage runs ~25 s apart.
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"What is the difference between culpable homicide and murder?","pattern":"hybrid-reranked","limit":5}' \
+  | jq '{status, t: .trace.rerank, r: [(.results[]|.+{kept:true}), (.omitted_candidates[]|.+{kept:false})] | map({section_id, kept, fr: .fused_rank, fs: .fused_score, rr: .rerank_rank, rs: .rerank_score, why: .omitted_reason, text: .text[:50]}) | sort_by(.fr)}'
+```
+
+Expected: `status: ok`; results ≤ `min(limit, RERANK_RETURN_LIMIT)` ordered by `rerank_rank`, `score == rerank_score`; omitted records carry `omitted_reason`; results + omitted = `trace.rerank.candidates`.
+
+Compare: run `hybrid` and `hybrid-reranked` with `generate_answer: true`, `limit: 5`; note section order (`fr → rr`), omitted IDs, `generation.outcome`, `trace.rerank.latency_ms`.
+
+Chat: `rag-hybrid-reranked` streams DRAFT, confidence and `Sources:`; cited chunks come from `results` only.
+
+Missing key: with `RERANK_API_KEY=` empty and the API restarted, `hybrid-reranked` → 503 `retrieval_not_ready` (query) / OpenAI-style error (chat); `hybrid` stays `ok`.
+
+Offline: `uv run pytest tests/test_rerank_retrieval.py tests/test_hybrid_retrieval.py`
+
+## Story 5.1 — Structured exact retrieval
+
+Postman: `POST http://127.0.0.1:8000/v1/query`, header `Content-Type: application/json`, Body → raw → JSON. Send each body below; check `status`, `trace.signals`, `trace.mongodb_called`, `trace.record`, `results`.
+
+| # | Body | Expected |
+|---|---|---|
+| 1 | `{"question": "What does BNS section 103 say?", "pattern": "structured"}` | `status: ok`; `results[0].section_id: bns:103`; `mongodb_called: true`; `trace.record` has `status`, `source_status_version` |
+| 2 | `{"question": "IPC section 302", "pattern": "structured"}` | `ok`; `ipc:302`; `mongodb_called: true` |
+| 3 | `{"question": "What does BNS section 103 say?", "pattern": "structured", "generate_answer": true}` | as #1, plus `generation.outcome` reported; `generation.citations` only `bns:103` |
+| 4 | `{"question": "What does section 103 say?", "pattern": "structured"}` | `clarification_needed`; `results: []`; `mongodb_called: false`; `trace.signals.reason` names missing act |
+| 5 | `{"question": "IPC section 4", "pattern": "structured"}` | HTTP 200; `not_found`; `results: []`; `mongodb_called: true` |
+| 6 | `{"question": "BNS section 999", "pattern": "structured"}` | same as #5 |
+| 7 | `{"question": "What is the punishment for theft?", "pattern": "structured"}` | `recommendation`; `mongodb_called: false` |
+
+Chat: `POST http://127.0.0.1:8000/v1/chat/completions`, same header, body `{"model": "rag-structured", "messages": [{"role": "user", "content": "What does BNS section 103 say?"}]}` (omit `stream` so Postman shows one JSON reply). `choices[0].message.content` shows DRAFT/confidence/`Sources:`. With content `What does section 103 say?` it is the clarification text only. If `CAPSTONE_API_KEY` is set, add `Authorization: Bearer <key>`.
+
+Optional compact view: in the request's **Scripts → Post-response** tab (Tests in older Postman) paste, then open the Console (View → Show Postman Console) instead of reading the full body:
+
+```js
+const b = pm.response.json();
+console.log(JSON.stringify({status: b.status, signals: b.trace.signals, mongodb_called: b.trace.mongodb_called,
+  record: b.trace.record, results: b.results.map(r => ({section_id: r.section_id, text: r.text.slice(0, 60)}))}));
+```
+
+Offline: `uv run pytest tests/test_structured_retrieval.py tests/test_smoke.py`
+
+## Story 5.2 — Query decomposition and HyDE
+
+Prerequisite: `.env` with `MONGODB_URI`, `VOYAGE_API_KEY`, `GENERATION_API_BASE_URL`, `GENERATION_API_KEY`. Pause ~25 s between live calls.
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"How does the BNS punishment for murder differ from the IPC punishment for murder?","pattern":"decomposition","generate_answer":true}' \
+  | jq '{status, reason: .trace.reason, t: (.trace | {decomposition, sufficiency}), s: [.subquestions[] | {subquestion, status, reason, ids: [.results[].section_id]}], g: (.generation | {outcome, confidence, text: .text[:200]})}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"What happens to someone who secretly takes a neighbour'"'"'s bike?","pattern":"hyde","generate_answer":true}' \
+  | jq '{status, t: .trace.hyde, direct: [.hyde_direct_candidates[].section_id], hyde: [.hyde_query_candidates[].section_id], final: [.results[] | {section_id, score}], debug_chars: (.hyde_hypothetical_text_debug | length), g: (.generation | {outcome, confidence, text: .text[:200]})}'
+```
+
+Expected: decomposition `ok` with 2 `evidenced` steps from both acts; a half with no corpus evidence gives `partial_answer` naming it; "What is theft?" gives `clarify` or one subquestion. HyDE `ok`, both candidate lists populated, `debug_chars > 0`, hypothetical text absent from `message`, `trace`, `generation` and chat.
+
+Missing config: with `GENERATION_API_KEY=` empty, both modes return 503 `retrieval_not_ready` naming it (chat: OpenAI-style envelope) while `semantic` stays `ok`.
+
+Chat: `rag-decomposition` / `rag-hyde` stream DRAFT, confidence and `Sources:`; `partial_answer` prints the unsupported-part message first.
+
+Offline: `uv run pytest tests/test_decomposition_hyde.py tests/test_smoke.py`
+
+## Story 6.1 — Bounded agentic RAG
+
+Prerequisite: `.env` with `MONGODB_URI`, `VOYAGE_API_KEY`, `GENERATION_API_BASE_URL`, `GENERATION_API_KEY`; optional `AGENTIC_DEADLINE_SECONDS` (default 20, valid 1-120; invalid -> 503 `retrieval_not_ready`). Pause ~25 s between live calls.
+
+Postman: Import → Raw text → paste one curl (no shell functions or pipes). Each is a plain single-line curl; `\u0027` is a JSON-escaped apostrophe (keeps the single-quoted shell string valid).
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"What does BNS section 103 say?","pattern":"agentic","generate_answer":true}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"What does IPC section 4 say?","pattern":"agentic"}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"What is the punishment for theft?","pattern":"agentic","generate_answer":true}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"What happens to someone who secretly takes a neighbour\u0027s bike?","pattern":"agentic","generate_answer":true}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"section 103","pattern":"agentic"}'
+curl -s http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"rag-agentic","messages":[{"role":"user","content":"What is the punishment for theft?"}]}'
+```
+
+Expected, in order: `ready_for_synthesis`, `path: exact_lookup`, `call_count: 1`, `bns:103`; `partial_result`, `record_not_found`, empty `results`; `ready_for_synthesis`, `path: semantic`, `generation.outcome: answered`; `path: vocab_mismatch` (`hyde_calls: 1` only if the direct step was inadequate; `hyde_hypothetical_text_debug: null`); `clarify`, `bare_section_number`, `call_count: 0`, empty `steps`; chat content with DRAFT, `Evidence check passed — confidence: high` and `Sources:` (omit `stream` for one JSON reply; add `Authorization: Bearer <key>` if `CAPSTONE_API_KEY` is set).
+
+Compact view: paste in **Scripts → Post-response** and read the Console (query requests only):
+
+```js
+const b = pm.response.json();
+console.log(JSON.stringify({status: b.status, path: b.trace.path, stop: b.trace.stop_reason, calls: b.trace.call_count, hyde: b.trace.hyde_calls,
+  steps: (b.trace.steps || []).map(s => [s.adapter, s.tool_status, s.adequate]), ids: b.results.map(r => r.section_id),
+  dbg: b.hyde_hypothetical_text_debug, g: b.generation ? {o: b.generation.outcome, c: b.generation.confidence, n: b.generation.citations.length} : null}));
+```
+
+Chat: `rag-agentic` streams DRAFT text, `Evidence check passed — confidence: high` and `Sources:`; non-answer statuses print `message` only.
+
+Offline: `uv run pytest tests/test_smoke.py`

@@ -11,11 +11,12 @@ from building_with_rag.registry import Pattern, run_pattern
 from building_with_rag.retrieval.hybrid import run_hybrid
 from building_with_rag.retrieval.rerank import run_hybrid_reranked
 from building_with_rag.retrieval.semantic import run_semantic
+from building_with_rag.retrieval.structured import run_structured
 
 _REASON_MAX = 200
 
 # Modes with real retrieval; they share one retrieve -> answer path.
-REAL_PATTERNS = frozenset({Pattern.SEMANTIC, Pattern.HYBRID, Pattern.HYBRID_RERANKED})
+REAL_PATTERNS = frozenset({Pattern.SEMANTIC, Pattern.HYBRID, Pattern.HYBRID_RERANKED, Pattern.STRUCTURED})
 
 
 def retrieve(request: QueryRequest) -> QueryResult:
@@ -26,6 +27,8 @@ def retrieve(request: QueryRequest) -> QueryResult:
         return run_hybrid(request)
     if request.pattern == Pattern.HYBRID_RERANKED:
         return run_hybrid_reranked(request)
+    if request.pattern == Pattern.STRUCTURED:
+        return run_structured(request)
     payload = run_pattern(request.pattern, request.question, request.caller_id)
     return QueryResult(**payload)
 
@@ -33,9 +36,11 @@ def retrieve(request: QueryRequest) -> QueryResult:
 def answer_events(question: str, retrieval: QueryResult) -> Iterator[tuple[str, object]]:
     """Yield ("notice"|"text", str) pieces, then ("final", GenerationResult | None).
 
-    Placeholder modes yield their message and no generation.
+    Placeholder modes and non-ok structured results yield their message and no generation.
     """
-    if retrieval.pattern not in {p.value for p in REAL_PATTERNS}:
+    if retrieval.pattern not in {p.value for p in REAL_PATTERNS} or (
+        retrieval.pattern == Pattern.STRUCTURED.value and retrieval.status != "ok"
+    ):
         yield ("text", retrieval.message)
         yield ("final", None)
         return

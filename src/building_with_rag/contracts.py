@@ -1,6 +1,6 @@
 """Shared API contracts. Later stories extend additively; never rename or add provider variants."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
@@ -29,6 +29,19 @@ class SemanticFilters(BaseModel):
     @classmethod
     def _check_access_level(cls, values: list[str]) -> list[str]:
         return [schema.validate_access_level(v) for v in values]
+
+
+class StructuredSignals(BaseModel):
+    """Validated output of the rule-based structured classifier (never raw question text)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    intent: Literal["exact_lookup", "filter", "aggregation"] | None = None
+    act: Literal["BNS_2023", "IPC_1860"] | None = None
+    section_number: int | None = Field(default=None, ge=1, le=999)
+    chapter: str | None = None
+    status: Literal["ok", "recommendation", "clarification_needed"]
+    reason: str
 
 
 class QueryRequest(BaseModel):

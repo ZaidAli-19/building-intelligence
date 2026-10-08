@@ -72,6 +72,24 @@ def _clients():
     return _mongo[db_name], _voyage
 
 
+def get_db():
+    """MongoDB database only (no Voyage); raises 503 when MONGODB_URI is unset."""
+    global _mongo
+    settings = get_settings()
+    if not settings.mongodb_uri:
+        raise _not_ready("MONGODB_URI is not set.")
+    with _lock:
+        if _mongo is None:
+            _mongo = MongoClient(
+                settings.mongodb_uri,
+                serverSelectionTimeoutMS=MONGO_TIMEOUT_MS,
+                connectTimeoutMS=MONGO_TIMEOUT_MS,
+                socketTimeoutMS=MONGO_TIMEOUT_MS * 3,
+            )
+    name = settings.mongodb_test_db_name if settings.app_env == "testing" else settings.mongodb_db_name
+    return _mongo[name]
+
+
 def _ensure_ready(db) -> None:
     global _ready
     if _ready:
