@@ -47,10 +47,10 @@ Expected (Story 4.1): `"pattern":"hybrid"`, `"status":"ok"`, fused `results` wit
 ```bash
 curl -s http://127.0.0.1:8000/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "hybrid-reranked"}'
+  -d '{"question": "What is theft?", "pattern": "hybrid-reranked", "limit": 5}'
 ```
 
-Expected: `"status":"not_implemented"`, message references `hybrid-reranked`.
+Expected (Story 4.2): `"pattern":"hybrid-reranked"`, `"status":"ok"`, `results` ordered by `rerank_rank` with `omitted_candidates` for the rest (requires `RERANK_API_KEY`; see Story 4.2).
 
 ### Query — structured
 
@@ -97,7 +97,7 @@ Expected: 422 validation error (question below min_length 1).
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid-reranked", "messages": [{"role": "user", "content": "What is theft?"}]}'
+  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}]}'
 ```
 
 Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contains `not implemented yet`.
@@ -107,7 +107,7 @@ Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contai
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid-reranked", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
+  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
 ```
 
 Expected: SSE `data:` frames with `delta` role then content, ending with `data: [DONE]`.
@@ -127,7 +127,7 @@ Expected: 400 with `"type":"invalid_request_error"`, `"code":"model_not_found"`.
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid-reranked", "messages": [{"role": "system", "content": "You are helpful."}]}'
+  -d '{"model": "rag-structured", "messages": [{"role": "system", "content": "You are helpful."}]}'
 ```
 
 Expected: 400 with `"code":"missing_user_message"`.
@@ -253,7 +253,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-Expected: first streams `DRAFT — checking evidence`, text with `[E1]`-style labels, then `Evidence check passed — confidence: high` and `Sources:` lines; a failed check shows `Check failed: … Retrying (attempt 2 of 2)…` or ends with `DRAFT — low confidence, not the final answer.`. Second ends with the insufficient-evidence sentence and no confidence. Both streams end with `finish_reason: "stop"` and `data: [DONE]`. Third returns 400 `model_not_found`. With `CAPSTONE_API_KEY` set, a missing or wrong bearer token returns 401 `invalid_api_key`. Other modes (e.g. `rag-hybrid-reranked`) on chat still return the `not_implemented` placeholder.
+Expected: first streams `DRAFT — checking evidence`, text with `[E1]`-style labels, then `Evidence check passed — confidence: high` and `Sources:` lines; a failed check shows `Check failed: … Retrying (attempt 2 of 2)…` or ends with `DRAFT — low confidence, not the final answer.`. Second ends with the insufficient-evidence sentence and no confidence. Both streams end with `finish_reason: "stop"` and `data: [DONE]`. Third returns 400 `model_not_found`. With `CAPSTONE_API_KEY` set, a missing or wrong bearer token returns 401 `invalid_api_key`. Other modes (e.g. `rag-structured`) on chat still return the `not_implemented` placeholder.
 
 
 ## Story 4.1 — Hybrid Search
@@ -281,4 +281,30 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model": "rag-hybrid", "stream": true, "messages": [{"role": "user", "content": "What is criminal breach of trust?"}]}'
 ```
 
-Expected: the index command ends with `chunk_text_index: READY (queryable)` (a second run says `reused`). Success returns `"pattern":"hybrid"`, `"status":"ok"`, at most 5 results in non-increasing `score` where `score == fused_score`, each with `semantic_rank` and/or `keyword_rank` and `fused_rank`, and `trace` showing `semantic`, `keyword`, `fusion`, and `contribution`. Edge case returns HTTP 200 with `"status":"no_results"` and empty `results`. Chat streams the same DRAFT/confidence/Sources text as `rag-semantic` and ends with `data: [DONE]`. If the keyword index is missing, hybrid returns 503 `retrieval_not_ready` naming the index command. `hybrid-reranked`, `structured`, `decomposition`, and `hyde` still return `not_implemented`.
+Expected: the index command ends with `chunk_text_index: READY (queryable)` (a second run says `reused`). Success returns `"pattern":"hybrid"`, `"status":"ok"`, at most 5 results in non-increasing `score` where `score == fused_score`, each with `semantic_rank` and/or `keyword_rank` and `fused_rank`, and `trace` showing `semantic`, `keyword`, `fusion`, and `contribution`. Edge case returns HTTP 200 with `"status":"no_results"` and empty `results`. Chat streams the same DRAFT/confidence/Sources text as `rag-semantic` and ends with `data: [DONE]`. If the keyword index is missing, hybrid returns 503 `retrieval_not_ready` naming the index command. `structured`, `decomposition`, and `hyde` still return `not_implemented`.
+
+
+## Story 4.2 — Hybrid Re-ranking
+
+What it adds: `pattern: "hybrid-reranked"` (`rag-hybrid-reranked`) re-scores a bounded set of hybrid candidates with one re-ranking call, so the answer is built from the passages the re-ranker ranks highest.
+
+Prerequisite: Story 4.1 working (including the keyword index), `.env` holds `RERANK_API_KEY`, API started as in Story 1.1.
+
+```bash
+# Success
+curl -s http://127.0.0.1:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the difference between culpable homicide and murder?", "pattern": "hybrid-reranked", "limit": 5}'
+
+# Chat with the re-ranked model
+curl -sN http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "rag-hybrid-reranked", "stream": true, "messages": [{"role": "user", "content": "What is the punishment for theft under the BNS?"}]}'
+
+# Failure: with RERANK_API_KEY empty (restart the API after changing .env)
+curl -s http://127.0.0.1:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is theft?", "pattern": "hybrid-reranked"}'
+```
+
+Expected: success returns `"status":"ok"`, at most `min(limit, RERANK_RETURN_LIMIT)` `results` with `rerank_rank` 1..n and `score == rerank_score`, each keeping `fused_rank`/`fused_score`; `omitted_candidates` hold the rest with `omitted_reason` (`not_sent_to_reranker` or `below_return_limit`); `trace.rerank` shows the counts and `latency_ms`. Chat streams DRAFT/confidence/`Sources:` text and ends with `data: [DONE]`. The failure returns HTTP 503 `retrieval_not_ready` ("RERANK_API_KEY is not set; hybrid-reranked requires it."), not `no_results`. A provider failure returns 502 `retrieval_upstream_error`. `structured`, `decomposition`, and `hyde` still return `not_implemented`.

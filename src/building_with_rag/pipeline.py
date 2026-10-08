@@ -9,20 +9,23 @@ from building_with_rag.contracts import GenerationResult, QueryRequest, QueryRes
 from building_with_rag.generation.answer import stream_answer
 from building_with_rag.registry import Pattern, run_pattern
 from building_with_rag.retrieval.hybrid import run_hybrid
+from building_with_rag.retrieval.rerank import run_hybrid_reranked
 from building_with_rag.retrieval.semantic import run_semantic
 
 _REASON_MAX = 200
 
 # Modes with real retrieval; they share one retrieve -> answer path.
-REAL_PATTERNS = frozenset({Pattern.SEMANTIC, Pattern.HYBRID})
+REAL_PATTERNS = frozenset({Pattern.SEMANTIC, Pattern.HYBRID, Pattern.HYBRID_RERANKED})
 
 
 def retrieve(request: QueryRequest) -> QueryResult:
-    """Semantic/hybrid -> real retrieval; every other mode -> its placeholder. HTTP errors propagate."""
+    """Semantic/hybrid/hybrid-reranked -> real retrieval; every other mode -> its placeholder. HTTP errors propagate."""
     if request.pattern == Pattern.SEMANTIC:
         return run_semantic(request)
     if request.pattern == Pattern.HYBRID:
         return run_hybrid(request)
+    if request.pattern == Pattern.HYBRID_RERANKED:
+        return run_hybrid_reranked(request)
     payload = run_pattern(request.pattern, request.question, request.caller_id)
     return QueryResult(**payload)
 

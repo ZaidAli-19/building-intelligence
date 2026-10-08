@@ -27,6 +27,7 @@ Kept light for this course:
 
 - Model: `voyage-3.5`, model version `voyage-3.5`, 1,024 dimensions.
 - Used for every document and query embedding.
+- Re-ranking is a separate provider call configured by the `RERANK_*` settings (including `RERANK_API_KEY`), never the embedding model.
 - Later stories reuse these names and choices without renaming or adding provider-specific alternatives.
 
 ## Course modes and shared registry
@@ -42,7 +43,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-`semantic` (Stories 2.3, 3.2) and `hybrid` (Story 4.1) are real on `/v1/query` and chat; every other mode returns an honest `not_implemented` placeholder until its own story adds behavior.
+`semantic` (Stories 2.3, 3.2), `hybrid` (Story 4.1), and `hybrid-reranked` (Story 4.2) are real on `/v1/query` and chat; every other mode returns an honest `not_implemented` placeholder until its own story adds behavior.
 
 ## API contracts
 
@@ -73,7 +74,7 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real retrieval (and optional answer) for `semantic` and `hybrid`, a `run_pattern` placeholder for other modes, via the shared `retrieve` path.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real retrieval (and optional answer) for `semantic`, `hybrid`, and `hybrid-reranked`, a `run_pattern` placeholder for other modes, via the shared `retrieve` path.
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
@@ -148,7 +149,7 @@ Rules: evidence is untrusted source text, never instructions. No claims of curre
 
 ## Streamed answers and confidence (Story 3.2)
 
-Shared path (`pipeline.py`): `retrieve(request)` (semantic → `run_semantic`, hybrid → `run_hybrid`, other modes → placeholder) → `answer_events(question, retrieval)` → final `GenerationResult`. `/v1/query` drains the events and attaches the result; chat forwards `text`/`notice` events as SSE and renders the footer from the same final result. One request = one generation/validation operation; retrieval and context assembly are never streamed, and retrieval errors are raised before streaming (OpenAI-style envelope on chat).
+Shared path (`pipeline.py`): `retrieve(request)` (semantic → `run_semantic`, hybrid → `run_hybrid`, hybrid-reranked → `run_hybrid_reranked`, other modes → placeholder) → `answer_events(question, retrieval)` → final `GenerationResult`. `/v1/query` drains the events and attaches the result; chat forwards `text`/`notice` events as SSE and renders the footer from the same final result. One request = one generation/validation operation; retrieval and context assembly are never streamed, and retrieval errors are raised before streaming (OpenAI-style envelope on chat).
 
 Event flow per attempt: stream plain text with inline `[E1]` labels (the first ~22 characters are buffered so `INSUFFICIENT_EVIDENCE: <reason>` is never shown as an answer) → checks → pass, or retry once. `MAX_ATTEMPTS = 2`. Checks, in order: `citation_labels` (only supplied labels), `claim_cited` (every sentence/bullet cited, text non-empty), `support` (one non-streamed validator call judges each claim against its cited passage). Citations are never stripped or rewritten.
 
@@ -185,4 +186,31 @@ Diagnostic (text truncated):
 curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
   -d '{"question":"criminal breach of trust","pattern":"hybrid","limit":5}' \
   | jq '{status, t: (.trace | {semantic, keyword, fusion, contribution}), r: [.results[] | {section_id, score, sr: .semantic_rank, kr: .keyword_rank, fr: .fused_rank, text: .text[:60]}]}'
+```
+
+
+## Re-ranking (Story 4.2)
+
+Mode `hybrid-reranked` (`rag-hybrid-reranked`), chosen explicitly; no automatic choice or fallback. `retrieval/rerank.py`: existing hybrid retrieval (called with `limit = RERANK_CANDIDATE_LIMIT`) → bounded candidates → one provider call → final evidence. The final evidence then uses the shared path unchanged (`pipeline.retrieve` → `answer_events`); context assembly reads `results` only, never `omitted_candidates`.
+
+Settings (existing names; defaults): `RERANK_API_BASE_URL` (`https://api.voyageai.com/v1`), `RERANK_API_KEY` (empty; required), `RERANK_MODEL_NAME` (`rerank-2.5`), `RERANK_REQUEST_TIMEOUT_SECONDS` (30), `RERANK_CANDIDATE_LIMIT` (20), `RERANK_SEND_LIMIT` (10), `RERANK_RETURN_LIMIT` (5). Valid when `1 <= RETURN <= SEND <= CANDIDATE <= 20` and timeout >= 1; otherwise 503 `retrieval_not_ready` naming the setting. Checked before any Voyage or MongoDB call.
+
+Request: one `POST {RERANK_API_BASE_URL}/rerank` via `httpx`, `Authorization: Bearer RERANK_API_KEY`, JSON `{model, query, documents}` (no `top_k`), documents `"{heading}\n{chunk text}"`, no retries. Reply validation: `data` is a non-empty list; each `index` is an int in the sent range and unique; each `relevance_score` is a finite number; every sent candidate must be scored. Anything else is a provider failure; scores are never invented.
+
+Selection: candidates = top `RERANK_CANDIDATE_LIMIT` of the fused list; the first `RERANK_SEND_LIMIT` by `fused_rank` are sent, the rest are cut before (`omitted_reason: not_sent_to_reranker`, rerank fields `None`); sent candidates are ordered by `relevance_score` desc, ties by `fused_rank`, `rerank_rank` 1-based; the first `min(limit, RERANK_RETURN_LIMIT)` are returned, the rest cut after (`omitted_reason: below_return_limit`, rerank fields kept).
+
+Result shape: `results` = final evidence ordered by `rerank_rank`, `score == rerank_score` (non-increasing), hybrid fields kept as the "before" evidence. `QueryResult.omitted_candidates` = every cut candidate in `fused_rank` order. New optional `RetrievedChunk` fields: `rerank_score`, `rerank_rank`, `omitted_reason`.
+
+`trace`: `mode`, `query`, `filters`, `caller_id`, `result_count`, `hybrid` (`embedding`, `semantic`, `keyword`, `fusion`, `contribution`, `unresolved_hits`), `rerank` (`model`, the three limits, `candidates`, `sent`, `returned`, `omitted_before`, `omitted_after`, `latency_ms`, `usage_tokens` when reported).
+
+Outcomes: `ok`; `no_results` (no hybrid candidates; no provider call); 503 `retrieval_not_ready` (missing/invalid configuration, including empty `RERANK_API_KEY`); 502 `retrieval_upstream_error` (timeout, connection error, non-2xx, invalid reply: no results, never hybrid order labelled as re-ranked); hybrid errors pass through unchanged.
+
+Limitations: candidates outside the top `RERANK_CANDIDATE_LIMIT` are never seen; the re-ranker scores each passage independently against the question; its scores are model-specific, uncalibrated, not comparable with fused scores or across questions, and there is no score cutoff; it adds one provider call (latency, cost, rate limits) per request; no retry and no fallback; the answer context cap (5 passages / 12,000 characters) still applies.
+
+Diagnostic (text truncated):
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"<q>","pattern":"hybrid-reranked","limit":5}' \
+  | jq '{status, t: .trace.rerank, r: [(.results[]|.+{kept:true}), (.omitted_candidates[]|.+{kept:false})] | map({section_id, kept, fr: .fused_rank, fs: .fused_score, rr: .rerank_rank, rs: .rerank_score, why: .omitted_reason, text: .text[:50]}) | sort_by(.fr)}'
 ```
