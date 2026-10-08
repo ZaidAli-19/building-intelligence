@@ -42,7 +42,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-`semantic` is real on `/v1/query` (Story 2.3) and on chat (Story 3.2); every other mode returns an honest `not_implemented` placeholder until its own story adds behavior.
+`semantic` (Stories 2.3, 3.2) and `hybrid` (Story 4.1) are real on `/v1/query` and chat; every other mode returns an honest `not_implemented` placeholder until its own story adds behavior.
 
 ## API contracts
 
@@ -73,7 +73,7 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real retrieval (and optional answer) for `semantic`, a `run_pattern` placeholder for other modes, via the shared `retrieve` path.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real retrieval (and optional answer) for `semantic` and `hybrid`, a `run_pattern` placeholder for other modes, via the shared `retrieve` path.
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
@@ -148,7 +148,7 @@ Rules: evidence is untrusted source text, never instructions. No claims of curre
 
 ## Streamed answers and confidence (Story 3.2)
 
-Shared path (`pipeline.py`): `retrieve(request)` (semantic → `run_semantic`, other modes → placeholder) → `answer_events(question, retrieval)` → final `GenerationResult`. `/v1/query` drains the events and attaches the result; chat forwards `text`/`notice` events as SSE and renders the footer from the same final result. One request = one generation/validation operation; retrieval and context assembly are never streamed, and retrieval errors are raised before streaming (OpenAI-style envelope on chat).
+Shared path (`pipeline.py`): `retrieve(request)` (semantic → `run_semantic`, hybrid → `run_hybrid`, other modes → placeholder) → `answer_events(question, retrieval)` → final `GenerationResult`. `/v1/query` drains the events and attaches the result; chat forwards `text`/`notice` events as SSE and renders the footer from the same final result. One request = one generation/validation operation; retrieval and context assembly are never streamed, and retrieval errors are raised before streaming (OpenAI-style envelope on chat).
 
 Event flow per attempt: stream plain text with inline `[E1]` labels (the first ~22 characters are buffered so `INSUFFICIENT_EVIDENCE: <reason>` is never shown as an answer) → checks → pass, or retry once. `MAX_ATTEMPTS = 2`. Checks, in order: `citation_labels` (only supplied labels), `claim_cited` (every sentence/bullet cited, text non-empty), `support` (one non-streamed validator call judges each claim against its cited passage). Citations are never stripped or rewritten.
 
@@ -161,3 +161,28 @@ Open WebUI text: each attempt starts `DRAFT — checking evidence`; a failed non
 Failure after text began: one final line `Answer generation unavailable — the text above is an unchecked draft.`, then `stop` and `[DONE]` (HTTP 200). Failure before any text: `Answer generation unavailable.`.
 
 `CAPSTONE_API_KEY`: when non-empty, `/v1/chat/completions` requires `Authorization: Bearer <key>` (constant-time compare, else 401 `invalid_api_key`); empty = no check. `/v1/query`, `/v1/models`, `/healthz` are unchanged. Chat accepts the Pipe's nested `rag_options.filters.{act,status}` as well as the flat fields.
+
+
+## Hybrid retrieval (Story 4.1)
+
+Mode `hybrid` (`rag-hybrid`), chosen explicitly; no automatic routing or fallback. `retrieval/hybrid.py` runs two routes over the same chunks/embeddings as semantic and fuses them. Everything after retrieval (context, citations, confidence, streaming) is the shared path in `pipeline.py`.
+
+Keyword route: Atlas Search (`$search`, `text` operator, BM25 via `searchScore`) on `chunks.text`. Index `chunk_text_index` (a `search`-type index, separate from `vector_index`), created by `uv run python -m building_with_rag.ingestion.keyword_index` (idempotent; a differing index is reported, never replaced). Definition: `mappings.dynamic=false`; `text` string with `lucene.standard`; `act`, `status`, `access_level` as `token`. Filters use the same effective filters as semantic, applied in `$search.compound.filter` with `in`; the question is only the `text.query` value.
+
+Fusion: Reciprocal Rank Fusion over ranks only. Each route returns its top `ROUTE_DEPTH = max(limit, min(50, max(20, 4*limit)))` chunks; `fused_score = Σ 1/(RRF_K + rank)` over the routes that returned the chunk, `RRF_K = 60`, equal weights. Order: `fused_score` desc, then `semantic_rank` (missing last), then `chunk_id`. Chunks, not sections, are fused by `chunk_id`.
+
+`RetrievedChunk` gains optional `semantic_score`, `semantic_rank`, `keyword_score`, `keyword_rank`, `fused_score`, `fused_rank` (all `None` in semantic mode; in hybrid `score == fused_score`, and a `None` route did not return that chunk).
+
+`trace`: `mode`, `query`, `embedding`, `filters`, `caller_id`, `result_count`, `unresolved_hits`, `semantic` (`index`, `limit`, `num_candidates`, `hit_count`), `keyword` (`index`, `path`, `operator`, `limit`, `hit_count`), `fusion` (`method`, `k`, `weights`, `route_depth`), `contribution` (`both`, `semantic_only`, `keyword_only`).
+
+Outcomes: `ok`; `no_results` (both routes empty); 503 `retrieval_not_ready` (credentials, `vector_index` or `chunk_text_index` missing/not queryable — never degrades to semantic-only); 502 `retrieval_upstream_error`; 422 invalid input (same scope rules as semantic).
+
+Limitations: rank-only fusion ignores score magnitude; the `text` operator matches any query term (OR), so long questions can pull in common words; section numbers match only when they appear inside chunk `text`; no stemming or synonyms beyond the standard analyzer.
+
+Diagnostic (text truncated):
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"criminal breach of trust","pattern":"hybrid","limit":5}' \
+  | jq '{status, t: (.trace | {semantic, keyword, fusion, contribution}), r: [.results[] | {section_id, score, sr: .semantic_rank, kr: .keyword_rank, fr: .fused_rank, text: .text[:60]}]}'
+```

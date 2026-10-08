@@ -108,16 +108,81 @@ def _mongo_filter(filters: dict[str, list[str]]) -> dict:
     return {"$and": clauses}
 
 
-def _validate_scope(request: QueryRequest) -> None:
+def _validate_scope(request: QueryRequest, mode: str = "semantic") -> None:
     problems = []
     if request.caller_id is not None and request.caller_id != get_settings().webui_demo_caller_id:
         problems.append("caller_id is not the permitted demo caller")
     if request.required_acts is not None:
-        problems.append("required_acts is not supported by semantic mode")
+        problems.append(f"required_acts is not supported by {mode} mode")
     if request.chapter is not None:
-        problems.append("chapter is not supported by semantic mode")
+        problems.append(f"chapter is not supported by {mode} mode")
     if problems:
         raise HTTPException(status_code=422, detail="; ".join(problems) + ".")
+
+
+def embed_question(voyage, question: str) -> list[float]:
+    """Embed the raw question (input_type="query"); fail on a wrong dimension."""
+    try:
+        vector = voyage.embed(
+            texts=[question], model=schema.EMBEDDING_MODEL, input_type=INPUT_TYPE
+        ).embeddings[0]
+    except VoyageError:
+        raise RetrievalError(502, "retrieval_upstream_error", "Voyage embedding request failed.") from None
+    if len(vector) != schema.EMBEDDING_DIMENSIONS:
+        raise _not_ready(
+            f"Query embedding has {len(vector)} dimensions; expected {schema.EMBEDDING_DIMENSIONS}."
+        )
+    return vector
+
+
+def vector_search(db, vector, limit: int, candidates: int, mongo_filter: dict) -> list[dict]:
+    """$vectorSearch on embeddings with the filter inside the stage; descending score order."""
+    pipeline = [
+        {"$vectorSearch": {
+            "index": schema.VECTOR_INDEX_NAME,
+            "path": "vector",
+            "queryVector": vector,
+            "numCandidates": candidates,
+            "limit": limit,
+            "filter": mongo_filter,
+        }},
+        {"$project": {"_id": 0, "chunk_id": 1, "score": {"$meta": "vectorSearchScore"}}},
+    ]
+    return list(db[schema.EMBEDDINGS_COLLECTION].aggregate(pipeline))
+
+
+def resolve_hits(db, hits: list[dict]) -> tuple[list[RetrievedChunk], int]:
+    """Resolve {chunk_id, score} hits through chunks and sections; unresolved hits are omitted."""
+    chunk_ids = [h["chunk_id"] for h in hits]
+    chunks = {c["chunk_id"]: c for c in db[schema.CHUNKS_COLLECTION].find({"chunk_id": {"$in": chunk_ids}})}
+    section_ids = list({c["section_id"] for c in chunks.values() if c.get("section_id")})
+    sections = {s["section_id"]: s for s in db[schema.SECTIONS_COLLECTION].find({"section_id": {"$in": section_ids}})}
+    results = []
+    unresolved = 0
+    for hit in hits:
+        chunk = chunks.get(hit["chunk_id"])
+        section = sections.get(chunk.get("section_id")) if chunk else None
+        if chunk is None or section is None:
+            unresolved += 1
+            continue
+        results.append(RetrievedChunk(
+            chunk_id=chunk["chunk_id"],
+            section_id=section["section_id"],
+            act=section.get("act") or chunk.get("act") or "",
+            text=chunk.get("text") or "",
+            heading=section.get("heading") or "",
+            score=hit["score"],
+            chunk_index=chunk.get("chunk_index"),
+            act_label=section.get("act_label"),
+            status=section.get("status"),
+            chapter=section.get("chapter"),
+            chapter_title=section.get("chapter_title"),
+            section_number=section.get("section_number"),
+            source_pdf=section.get("source_pdf"),
+            source_sha256=section.get("source_sha256"),
+            needs_review=section.get("needs_review"),
+        ))
+    return results, unresolved
 
 
 def _result(request, status, message, trace, results) -> QueryResult:
@@ -174,62 +239,12 @@ def _run(request: QueryRequest) -> QueryResult:
             "No passages match the given filters. " + _SCORE_NOTE, trace, [],
         )
 
+    vector = embed_question(voyage, request.question)
     try:
-        vector = voyage.embed(
-            texts=[request.question], model=schema.EMBEDDING_MODEL, input_type=INPUT_TYPE
-        ).embeddings[0]
-    except VoyageError:
-        raise RetrievalError(502, "retrieval_upstream_error", "Voyage embedding request failed.") from None
-    if len(vector) != schema.EMBEDDING_DIMENSIONS:
-        raise _not_ready(
-            f"Query embedding has {len(vector)} dimensions; expected {schema.EMBEDDING_DIMENSIONS}."
-        )
-
-    pipeline = [
-        {"$vectorSearch": {
-            "index": schema.VECTOR_INDEX_NAME,
-            "path": "vector",
-            "queryVector": vector,
-            "numCandidates": candidates,
-            "limit": limit,
-            "filter": mongo_filter,
-        }},
-        {"$project": {"_id": 0, "chunk_id": 1, "score": {"$meta": "vectorSearchScore"}}},
-    ]
-    try:
-        hits = list(db[schema.EMBEDDINGS_COLLECTION].aggregate(pipeline))
-        chunk_ids = [h["chunk_id"] for h in hits]
-        chunks = {c["chunk_id"]: c for c in db[schema.CHUNKS_COLLECTION].find({"chunk_id": {"$in": chunk_ids}})}
-        section_ids = list({c["section_id"] for c in chunks.values() if c.get("section_id")})
-        sections = {s["section_id"]: s for s in db[schema.SECTIONS_COLLECTION].find({"section_id": {"$in": section_ids}})}
+        hits = vector_search(db, vector, limit, candidates, mongo_filter)
+        results, unresolved = resolve_hits(db, hits)
     except PyMongoError:
         raise RetrievalError(502, "retrieval_upstream_error", "MongoDB request failed.") from None
-
-    results = []
-    unresolved = 0
-    for hit in hits:
-        chunk = chunks.get(hit["chunk_id"])
-        section = sections.get(chunk.get("section_id")) if chunk else None
-        if chunk is None or section is None:
-            unresolved += 1
-            continue
-        results.append(RetrievedChunk(
-            chunk_id=chunk["chunk_id"],
-            section_id=section["section_id"],
-            act=section.get("act") or chunk.get("act") or "",
-            text=chunk.get("text") or "",
-            heading=section.get("heading") or "",
-            score=hit["score"],
-            chunk_index=chunk.get("chunk_index"),
-            act_label=section.get("act_label"),
-            status=section.get("status"),
-            chapter=section.get("chapter"),
-            chapter_title=section.get("chapter_title"),
-            section_number=section.get("section_number"),
-            source_pdf=section.get("source_pdf"),
-            source_sha256=section.get("source_sha256"),
-            needs_review=section.get("needs_review"),
-        ))
     trace["result_count"] = len(results)
     trace["unresolved_hits"] = unresolved
     return _result(

@@ -8,15 +8,21 @@ from collections.abc import Iterator
 from building_with_rag.contracts import GenerationResult, QueryRequest, QueryResult
 from building_with_rag.generation.answer import stream_answer
 from building_with_rag.registry import Pattern, run_pattern
+from building_with_rag.retrieval.hybrid import run_hybrid
 from building_with_rag.retrieval.semantic import run_semantic
 
 _REASON_MAX = 200
 
+# Modes with real retrieval; they share one retrieve -> answer path.
+REAL_PATTERNS = frozenset({Pattern.SEMANTIC, Pattern.HYBRID})
+
 
 def retrieve(request: QueryRequest) -> QueryResult:
-    """Semantic -> real retrieval; every other mode -> its placeholder. HTTP errors propagate."""
+    """Semantic/hybrid -> real retrieval; every other mode -> its placeholder. HTTP errors propagate."""
     if request.pattern == Pattern.SEMANTIC:
         return run_semantic(request)
+    if request.pattern == Pattern.HYBRID:
+        return run_hybrid(request)
     payload = run_pattern(request.pattern, request.question, request.caller_id)
     return QueryResult(**payload)
 
@@ -24,9 +30,9 @@ def retrieve(request: QueryRequest) -> QueryResult:
 def answer_events(question: str, retrieval: QueryResult) -> Iterator[tuple[str, object]]:
     """Yield ("notice"|"text", str) pieces, then ("final", GenerationResult | None).
 
-    Non-semantic modes yield their placeholder message and no generation.
+    Placeholder modes yield their message and no generation.
     """
-    if retrieval.pattern != Pattern.SEMANTIC.value:
+    if retrieval.pattern not in {p.value for p in REAL_PATTERNS}:
         yield ("text", retrieval.message)
         yield ("final", None)
         return

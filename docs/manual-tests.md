@@ -37,10 +37,10 @@ Expected (Story 2.3): `"status":"ok"` with ranked passages in `results` (require
 ```bash
 curl -s http://127.0.0.1:8000/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "hybrid"}'
+  -d '{"question": "criminal breach of trust", "pattern": "hybrid", "limit": 5}'
 ```
 
-Expected: `"status":"not_implemented"`, message references `hybrid`.
+Expected (Story 4.1): `"pattern":"hybrid"`, `"status":"ok"`, fused `results` with `semantic_rank`/`keyword_rank`/`fused_rank` (requires the keyword index; see Story 4.1).
 
 ### Query — hybrid-reranked
 
@@ -97,7 +97,7 @@ Expected: 422 validation error (question below min_length 1).
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid", "messages": [{"role": "user", "content": "What is theft?"}]}'
+  -d '{"model": "rag-hybrid-reranked", "messages": [{"role": "user", "content": "What is theft?"}]}'
 ```
 
 Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contains `not implemented yet`.
@@ -107,7 +107,7 @@ Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contai
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
+  -d '{"model": "rag-hybrid-reranked", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
 ```
 
 Expected: SSE `data:` frames with `delta` role then content, ending with `data: [DONE]`.
@@ -127,7 +127,7 @@ Expected: 400 with `"type":"invalid_request_error"`, `"code":"model_not_found"`.
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid", "messages": [{"role": "system", "content": "You are helpful."}]}'
+  -d '{"model": "rag-hybrid-reranked", "messages": [{"role": "system", "content": "You are helpful."}]}'
 ```
 
 Expected: 400 with `"code":"missing_user_message"`.
@@ -253,4 +253,32 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-Expected: first streams `DRAFT — checking evidence`, text with `[E1]`-style labels, then `Evidence check passed — confidence: high` and `Sources:` lines; a failed check shows `Check failed: … Retrying (attempt 2 of 2)…` or ends with `DRAFT — low confidence, not the final answer.`. Second ends with the insufficient-evidence sentence and no confidence. Both streams end with `finish_reason: "stop"` and `data: [DONE]`. Third returns 400 `model_not_found`. With `CAPSTONE_API_KEY` set, a missing or wrong bearer token returns 401 `invalid_api_key`. Other modes (e.g. `rag-hybrid`) on chat still return the `not_implemented` placeholder.
+Expected: first streams `DRAFT — checking evidence`, text with `[E1]`-style labels, then `Evidence check passed — confidence: high` and `Sources:` lines; a failed check shows `Check failed: … Retrying (attempt 2 of 2)…` or ends with `DRAFT — low confidence, not the final answer.`. Second ends with the insufficient-evidence sentence and no confidence. Both streams end with `finish_reason: "stop"` and `data: [DONE]`. Third returns 400 `model_not_found`. With `CAPSTONE_API_KEY` set, a missing or wrong bearer token returns 401 `invalid_api_key`. Other modes (e.g. `rag-hybrid-reranked`) on chat still return the `not_implemented` placeholder.
+
+
+## Story 4.1 — Hybrid Search
+
+What it adds: `pattern: "hybrid"` (`rag-hybrid`) fuses Atlas Search keyword hits on chunk text with the semantic vector hits by Reciprocal Rank Fusion.
+
+Prerequisite: Story 2.3 working, API started as in Story 1.1; create the keyword index once with the first command (waits until `READY`).
+
+```bash
+uv run python -m building_with_rag.ingestion.keyword_index
+
+# Success
+curl -s http://127.0.0.1:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "criminal breach of trust", "pattern": "hybrid", "limit": 5}'
+
+# Edge case: filters leave nothing (IPC is repealed)
+curl -s http://127.0.0.1:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "criminal breach of trust", "pattern": "hybrid", "filters": {"act": ["IPC_1860"], "status": ["in_force"]}}'
+
+# Chat with the hybrid model
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "rag-hybrid", "stream": true, "messages": [{"role": "user", "content": "What is criminal breach of trust?"}]}'
+```
+
+Expected: the index command ends with `chunk_text_index: READY (queryable)` (a second run says `reused`). Success returns `"pattern":"hybrid"`, `"status":"ok"`, at most 5 results in non-increasing `score` where `score == fused_score`, each with `semantic_rank` and/or `keyword_rank` and `fused_rank`, and `trace` showing `semantic`, `keyword`, `fusion`, and `contribution`. Edge case returns HTTP 200 with `"status":"no_results"` and empty `results`. Chat streams the same DRAFT/confidence/Sources text as `rag-semantic` and ends with `data: [DONE]`. If the keyword index is missing, hybrid returns 503 `retrieval_not_ready` naming the index command. `hybrid-reranked`, `structured`, `decomposition`, and `hyde` still return `not_implemented`.

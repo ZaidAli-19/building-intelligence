@@ -59,6 +59,13 @@ class RetrievedChunk(BaseModel):
     source_pdf: str | None = None
     source_sha256: str | None = None
     needs_review: bool | None = None
+    # Hybrid only: per-route score/rank (None when that route did not return the chunk).
+    semantic_score: float | None = None
+    semantic_rank: int | None = None
+    keyword_score: float | None = None
+    keyword_rank: int | None = None
+    fused_score: float | None = None
+    fused_rank: int | None = None
 
 
 class Claim(BaseModel):
