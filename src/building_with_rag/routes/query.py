@@ -3,8 +3,7 @@
 from fastapi import APIRouter
 
 from building_with_rag.contracts import QueryRequest, QueryResult
-from building_with_rag.pipeline import REAL_PATTERNS, answer_events, retrieve
-from building_with_rag.registry import Pattern
+from building_with_rag.pipeline import answer_events, answerable, retrieve
 
 router = APIRouter()
 
@@ -24,9 +23,7 @@ _LOW_CONFIDENCE = (
 @router.post("/v1/query")
 def query(request: QueryRequest) -> QueryResult:
     result = retrieve(request)
-    if request.pattern == Pattern.STRUCTURED and result.status != "ok":
-        return result  # no model call for clarification/recommendation/not_found
-    if request.pattern in REAL_PATTERNS and request.generate_answer:
+    if request.generate_answer and answerable(result):  # no model call for other statuses
         for kind, payload in answer_events(request.question, result):
             if kind == "final":
                 result.generation = payload

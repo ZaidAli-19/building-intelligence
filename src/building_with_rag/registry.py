@@ -10,6 +10,7 @@ class Pattern(str, Enum):
     STRUCTURED = "structured"
     DECOMPOSITION = "decomposition"
     HYDE = "hyde"
+    AGENTIC = "agentic"
 
 
 # Registry: mode -> model ID. Later stories add behavior, never entries or renames.
@@ -20,6 +21,7 @@ PATTERN_MODEL_IDS: dict[Pattern, str] = {
     Pattern.STRUCTURED: "rag-structured",
     Pattern.DECOMPOSITION: "rag-decomposition",
     Pattern.HYDE: "rag-hyde",
+    Pattern.AGENTIC: "rag-agentic",
 }
 
 MODEL_ID_TO_PATTERN: dict[str, Pattern] = {mid: p for p, mid in PATTERN_MODEL_IDS.items()}

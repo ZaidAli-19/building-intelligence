@@ -132,6 +132,13 @@ class GenerationResult(BaseModel):
     low_confidence_reason: str = ""
 
 
+class SubquestionEvidence(BaseModel):
+    subquestion: str
+    status: str  # evidenced | no_evidence
+    results: list[RetrievedChunk] = Field(default_factory=list)
+    reason: str | None = None
+
+
 class QueryResult(BaseModel):
     pattern: str
     status: str
@@ -141,7 +148,7 @@ class QueryResult(BaseModel):
     generation: GenerationResult | None = None
     # Additive, empty-by-default fields later modes use:
     omitted_candidates: list[RetrievedChunk] = Field(default_factory=list)
-    subquestions: list[str] = Field(default_factory=list)
+    subquestions: list[SubquestionEvidence] = Field(default_factory=list)
     hyde_direct_candidates: list[RetrievedChunk] = Field(default_factory=list)
     hyde_query_candidates: list[RetrievedChunk] = Field(default_factory=list)
     hyde_hypothetical_text_debug: str | None = None

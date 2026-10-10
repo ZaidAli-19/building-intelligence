@@ -1,0 +1,15 @@
+# Handout 5.2 — Query decomposition and HyDE
+
+Paste this prompt into your coding assistant from the capstone repository:
+
+---
+
+Create `docs/stories/story-5-2-query-decomposition-hyde.md`. Create the story only; do **not** implement it. Read the architecture, all prior stories, existing generation and retrieval patterns, diagnostics, and Open WebUI adapter first. Preserve working modes, routes, response shapes, and streaming behavior.
+
+Write a focused implementation story with purpose, prerequisites, work to do, completion checks, and handover. It adds two bounded course modes: `decomposition` for a compound comparison question and `hyde` for a vocabulary-mismatch question. It must reuse the existing Voyage embedding and LiteLLM generation settings in the project’s `.env.example`, without new or renamed provider variables. These are small retrieval extensions, not agents, automatic routing, graph construction, or a new application.
+
+For decomposition, use the compatible additive `QueryResult.subquestions` list of `SubquestionEvidence` (defined in Story 1.1: `subquestion`, `status`, `results`, optional `reason`), with every real passage also retained in the top-level `results` union. Require a bounded step that turns one compound question into one to three unique, clear subquestions. Reject empty, malformed, duplicate, or out-of-scope output as `clarify`. Every accepted subquestion is required: retrieve actual corpus evidence for each, and return `partial_answer` or `clarify` rather than synthesize a complete comparison when one lacks evidence. Expose subquestions, per-step evidence, and the partial/insufficient reason in `/v1/query` diagnostics.
+
+For HyDE, preserve the compatible `QueryResult` additions: direct candidates in `hyde_direct_candidates`, hypothetical-query candidates in `hyde_query_candidates`, deduplicated final real passages in `results`, and the hypothetical passage only in `hyde_hypothetical_text_debug`. Generate one hypothetical retrieval text, reject empty or malformed text as `hyde_unavailable`, embed it with the existing retrieval model, and use it only to find real corpus passages. Hypothetical text is never an answer source, citation, or evidence. If required model configuration is missing, report it; do not fabricate a hypothetical document or pretend a comparison ran.
+
+Expose both modes through the established registry and their exact existing model IDs, `rag-decomposition` and `rag-hyde`, plus diagnostics, grounded-answer path, confidence rules, and Open WebUI streaming. Require one prepared BNS-versus-IPC comparison for decomposition and one vocabulary-mismatch question for HyDE; inspect evidence before showing the chat answer. Smoke-check all six modes available at the end of Session 5 through `/v1/query` and Open WebUI so later additions have not broken earlier contracts. Keep checks small and descriptive. Do not add a general evaluation harness, GraphRAG, open-ended agentic loops, production security, or follow-up conversation memory. Update architecture limitations and commands. After creating the story, report its path only.

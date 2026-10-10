@@ -42,15 +42,16 @@ One shared registry (single source of truth) holds only:
 | structured | `rag-structured` |
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
+| agentic | `rag-agentic` |
 
-`semantic` (Stories 2.3, 3.2), `hybrid` (Story 4.1), and `hybrid-reranked` (Story 4.2), and `structured` (Story 5.1) are real on `/v1/query` and chat; every other mode returns an honest `not_implemented` placeholder until its own story adds behavior.
+`semantic` (Stories 2.3, 3.2), `hybrid` (Story 4.1), and `hybrid-reranked` (Story 4.2), `structured` (Story 5.1), `decomposition` and `hyde` (Story 5.2), `agentic` (Story 6.1) are real on `/v1/query` and chat; any mode without behavior would return an honest `not_implemented` placeholder until its own story adds behavior.
 
 ## API contracts
 
 ### `QueryRequest` (`POST /v1/query`)
 
 - `question`: string, 1–4,000 characters, required.
-- `pattern`: one of the six modes.
+- `pattern`: one of the seven modes.
 - `caller_id`: optional.
 - `filters`: optional `SemanticFilters` — `act`, `status`, `access_level`, each a list.
 - `limit`: default 5, range 1–20.
@@ -64,7 +65,7 @@ The classroom seed may resolve only its fixed local demo caller, but keeps `call
 
 - `pattern`, `status`, `message`, `trace`, `results`.
 - Optional `generation`.
-- Additive empty-by-default fields later modes use: `omitted_candidates`, `subquestions`, `hyde_direct_candidates`, `hyde_query_candidates`, `hyde_hypothetical_text_debug`.
+- Additive empty-by-default fields later modes use: `omitted_candidates`, `subquestions` (list of `SubquestionEvidence`: `subquestion`, `status` `evidenced`|`no_evidence`, `results`, optional `reason`), `hyde_direct_candidates`, `hyde_query_candidates`, `hyde_hypothetical_text_debug`.
 - No parallel top-level `outcome`, `evidence`, `answer`, `confidence`, `citations`, or `diagnostics` fields.
 
 ### `RetrievedChunk`
@@ -74,8 +75,8 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real retrieval (and optional answer) for `semantic`, `hybrid`, `hybrid-reranked`, and `structured`, a `run_pattern` placeholder for other modes, via the shared `retrieve` path.
-- `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real retrieval (and optional answer) for all seven modes (a `run_pattern` placeholder remains only as an unreachable default), via the shared `retrieve` path.
+- `GET /v1/models` — lists the seven `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
 The chat adapter maps the selected model to the same `QueryRequest` and the same `retrieve` → `answer_events` path (`pipeline.py`) as `/v1/query`; it sets server-side demo `caller_id` and `generate_answer`. Supports normal OpenAI Chat Completions JSON responses and role/content/stop frames, plus the OpenAI-style error envelope before streaming begins. No duplicated implementations, no custom SSE events that Open WebUI cannot render.
@@ -149,7 +150,7 @@ Rules: evidence is untrusted source text, never instructions. No claims of curre
 
 ## Streamed answers and confidence (Story 3.2)
 
-Shared path (`pipeline.py`): `retrieve(request)` (semantic → `run_semantic`, hybrid → `run_hybrid`, hybrid-reranked → `run_hybrid_reranked`, structured → `run_structured`, other modes → placeholder) → `answer_events(question, retrieval)` → final `GenerationResult`. `/v1/query` drains the events and attaches the result; chat forwards `text`/`notice` events as SSE and renders the footer from the same final result. One request = one generation/validation operation; retrieval and context assembly are never streamed, and retrieval errors are raised before streaming (OpenAI-style envelope on chat).
+Shared path (`pipeline.py`): `retrieve(request)` (semantic → `run_semantic`, hybrid → `run_hybrid`, hybrid-reranked → `run_hybrid_reranked`, structured → `run_structured`, decomposition → `run_decomposition`, hyde → `run_hyde`, agentic → `run_agentic`) → `answer_events(question, retrieval)` → final `GenerationResult`. `/v1/query` drains the events and attaches the result; chat forwards `text`/`notice` events as SSE and renders the footer from the same final result. One request = one generation/validation operation; retrieval and context assembly are never streamed, and retrieval errors are raised before streaming (OpenAI-style envelope on chat).
 
 Event flow per attempt: stream plain text with inline `[E1]` labels (the first ~22 characters are buffered so `INSUFFICIENT_EVIDENCE: <reason>` is never shown as an answer) → checks → pass, or retry once. `MAX_ATTEMPTS = 2`. Checks, in order: `citation_labels` (only supplied labels), `claim_cited` (every sentence/bullet cited, text non-empty), `support` (one non-streamed validator call judges each claim against its cited passage). Citations are never stripped or rewritten.
 
@@ -237,3 +238,30 @@ curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
   -d '{"question":"What does BNS section 103 say?","pattern":"structured"}' \
   | jq '{status, t: (.trace | {signals, mongodb_called, record}), r: [.results[] | {section_id, act, status, text: .text[:60]}]}'
 ```
+
+## Query decomposition and HyDE (Story 5.2)
+
+Modes `decomposition` (`rag-decomposition`) and `hyde` (`rag-hyde`), chosen explicitly; no routing or fallback. Modules: `retrieval/decomposition.py`, `retrieval/hyde.py`, shared `retrieval/expansion.py` (one non-streamed `GENERATION_*` call, one Voyage-embed + `$vectorSearch`). Only existing settings are used. Missing `GENERATION_API_BASE_URL`/`GENERATION_API_KEY` (or `MONGODB_URI`/`VOYAGE_API_KEY`) → 503 `retrieval_not_ready` naming it, before any provider call; provider failure → 502 `retrieval_upstream_error`; no retries. Answer, confidence, citations and chat streaming are the shared path (`pipeline.answerable` decides whether a result may reach the answer step).
+
+Decomposition: one call splits the question into 1–3 unique subquestions (JSON, each ≤300 chars). Empty, malformed, duplicate, over-three or out-of-scope output → `clarify`. Each subquestion is retrieved semantically (`min(limit, 5)` passages); one sufficiency call judges each step with passages (a step with none is `no_evidence` without a call; an invalid verdict reply is a 502, never assumed sufficient). `QueryResult.subquestions` holds a `SubquestionEvidence` per step; `results` is the deduplicated union of evidenced steps only, interleaved by step so each part survives the 5-passage context cap. Status `ok` (all evidenced), `partial_answer` (some missing; `message` and `trace.reason` name them; the answer is prefixed with that message, never a complete comparison), `clarify` (invalid decomposition or nothing evidenced; no model answer call). `trace`: `decomposition` (`count`, `latency_ms`), `sufficiency.steps`, `hit_counts`, `reason`.
+
+HyDE: one call writes a short hypothetical passage; empty, over 1,500 characters or `NOT_POSSIBLE` → `hyde_unavailable` (HTTP 200, no search, no direct-only fallback). Otherwise the raw question (direct) and the hypothetical text (embedded with `voyage-3.5`, `input_type="query"`) are searched at depth `max(limit, 10)`; `results` = deduplicated real passages by best score, cut to `limit`. `hyde_direct_candidates`, `hyde_query_candidates` hold the two lists. The hypothetical text appears only in `hyde_hypothetical_text_debug` — never in `message`, `trace`, `results`, generation context, citations or chat. `trace.hyde`: `hypothetical_chars`, `direct_hits`, `query_hits`, `overlap`, `final_count`, `latency_ms`.
+
+Limitations: at most 3 subquestions, semantic retrieval per step only, no iteration or follow-up memory; sufficiency is a model judgment; HyDE adds one provider call plus a second embedding and can drift from corpus wording; no automatic mode choice; no evaluation harness.
+
+Diagnostics and commands: see `docs/manual-tests.md` (Story 5.2); offline `uv run pytest tests/test_decomposition_hyde.py tests/test_smoke.py`.
+
+
+## Bounded agentic RAG (Story 6.1)
+
+Mode `agentic` (`rag-agentic`), chosen explicitly; no other mode routes to it. `retrieval/agentic.py` is deterministic, read-only application code (no LLM planner) over a fixed allowlist: `structuredLookup` (`run_structured`), `semanticRetrieve` (`run_semantic`), `hydeRetrieve` (`run_hyde`). Every call gets a copy of the same `QueryRequest`, so the demo/public scope and request constraints apply unchanged.
+
+Rules, in order: (1) validate before any call: a bare section number (no act), several sections or both acts → `clarify` (`bare_section_number` / `ambiguous_request`), no tool call, trace without the question; (2) exactly one act + one integer section → path `exact_lookup`, one `structuredLookup`; `not_found` → `partial_result` (`record_not_found`), never a guess or fallback; (3) a lay cue (`LAY_CUES`) without a corpus legal term (`LEGAL_TERMS`), whole-word, case-insensitive → path `vocab_mismatch`: `semanticRetrieve`, then `hydeRetrieve` once only if the direct result is inadequate; (4) otherwise path `semantic`: one `semanticRetrieve`. Adequacy rule: adapter `status == "ok"` and at least one passage with non-empty text; on the `vocab_mismatch` path the direct `semanticRetrieve` step must also return a passage whose heading or text contains a `LEGAL_TERMS` word, otherwise it is inadequate and HyDE runs once.
+
+Budget: at most 2 calls, at most 1 HyDE call; no retries, parallel or recursive work. `AGENTIC_DEADLINE_SECONDS` (app setting, default 20, valid 1–120, otherwise 503 `retrieval_not_ready`) is checked before each call; expiry stops with `deadline_exceeded` (a call in flight is not interrupted). Adapter HTTP failure or a malformed result stops with `tool_error`; the HTTP error is re-raised (no fabricated evidence).
+
+Result: `status` `ready_for_synthesis` | `partial_result` | `clarify`; `results` are the adapter's real passages only. HyDE text, candidate lists and adapter traces are dropped (`hyde_hypothetical_text_debug` is always null). `trace`: `mode`, `validation`, `path`, `steps` (`adapter`, `tool_status`, `adequate`, `result_count`), `call_count`, `hyde_calls`, `deadline_seconds`, `elapsed_ms`, `stop_reason` (`evidence_adequate`, `record_not_found`, `adapter_clarification`, `no_usable_evidence`, `deadline_exceeded`, `call_budget_exhausted`, `tool_error`, or a validation reason), `caller_id`, `result_count`. The grounded answer runs only when real passages exist (`pipeline.answerable`); `partial_result` answers are prefixed with the message.
+
+Limitations: no LLM planning; the lay-cue rule is a short fixed list and misses other phrasing; at most two calls; adequacy is existence only, not relevance; no memory, re-ranking or automatic routing; no production security or observability.
+
+Commands: see `docs/manual-tests.md` (Story 6.1); offline `uv run pytest tests/test_agentic.py tests/test_smoke.py`.
