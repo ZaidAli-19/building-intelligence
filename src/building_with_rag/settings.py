@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     rerank_send_limit: int = 10
     rerank_return_limit: int = 5
     agentic_deadline_seconds: str = "20"  # validated (1-120) when agentic runs
+    mcp_server_url: str = ""
+    mcp_deadline_seconds: str = "10"  # validated (1-60) when mcp runs
+    public_base_url: str = "http://127.0.0.1:8000"  # prefix of /pdf download links
 
 
 def get_settings() -> Settings:

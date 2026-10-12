@@ -43,15 +43,16 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 | agentic | `rag-agentic` |
+| mcp | `rag-mcp` |
 
-`semantic` (Stories 2.3, 3.2), `hybrid` (Story 4.1), and `hybrid-reranked` (Story 4.2), `structured` (Story 5.1), `decomposition` and `hyde` (Story 5.2), `agentic` (Story 6.1) are real on `/v1/query` and chat; any mode without behavior would return an honest `not_implemented` placeholder until its own story adds behavior.
+`semantic` (Stories 2.3, 3.2), `hybrid` (Story 4.1), and `hybrid-reranked` (Story 4.2), `structured` (Story 5.1), `decomposition` and `hyde` (Story 5.2), `agentic` (Story 6.1), `mcp` (Story 7.1) are real on `/v1/query` and chat; any mode without behavior would return an honest `not_implemented` placeholder until its own story adds behavior.
 
 ## API contracts
 
 ### `QueryRequest` (`POST /v1/query`)
 
 - `question`: string, 1–4,000 characters, required.
-- `pattern`: one of the seven modes.
+- `pattern`: one of the eight modes.
 - `caller_id`: optional.
 - `filters`: optional `SemanticFilters` — `act`, `status`, `access_level`, each a list.
 - `limit`: default 5, range 1–20.
@@ -75,8 +76,8 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real retrieval (and optional answer) for all seven modes (a `run_pattern` placeholder remains only as an unreachable default), via the shared `retrieve` path.
-- `GET /v1/models` — lists the seven `rag-<pattern>` model IDs.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real retrieval (and optional answer) for all eight modes (a `run_pattern` placeholder remains only as an unreachable default), via the shared `retrieve` path.
+- `GET /v1/models` — lists the eight `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
 The chat adapter maps the selected model to the same `QueryRequest` and the same `retrieve` → `answer_events` path (`pipeline.py`) as `/v1/query`; it sets server-side demo `caller_id` and `generate_answer`. Supports normal OpenAI Chat Completions JSON responses and role/content/stop frames, plus the OpenAI-style error envelope before streaming begins. No duplicated implementations, no custom SSE events that Open WebUI cannot render.
@@ -150,7 +151,7 @@ Rules: evidence is untrusted source text, never instructions. No claims of curre
 
 ## Streamed answers and confidence (Story 3.2)
 
-Shared path (`pipeline.py`): `retrieve(request)` (semantic → `run_semantic`, hybrid → `run_hybrid`, hybrid-reranked → `run_hybrid_reranked`, structured → `run_structured`, decomposition → `run_decomposition`, hyde → `run_hyde`, agentic → `run_agentic`) → `answer_events(question, retrieval)` → final `GenerationResult`. `/v1/query` drains the events and attaches the result; chat forwards `text`/`notice` events as SSE and renders the footer from the same final result. One request = one generation/validation operation; retrieval and context assembly are never streamed, and retrieval errors are raised before streaming (OpenAI-style envelope on chat).
+Shared path (`pipeline.py`): `retrieve(request)` (semantic → `run_semantic`, hybrid → `run_hybrid`, hybrid-reranked → `run_hybrid_reranked`, structured → `run_structured`, decomposition → `run_decomposition`, hyde → `run_hyde`, agentic → `run_agentic`, mcp → `run_mcp`) → `answer_events(question, retrieval)` → final `GenerationResult`. `/v1/query` drains the events and attaches the result; chat forwards `text`/`notice` events as SSE and renders the footer from the same final result. One request = one generation/validation operation; retrieval and context assembly are never streamed, and retrieval errors are raised before streaming (OpenAI-style envelope on chat).
 
 Event flow per attempt: stream plain text with inline `[E1]` labels (the first ~22 characters are buffered so `INSUFFICIENT_EVIDENCE: <reason>` is never shown as an answer) → checks → pass, or retry once. `MAX_ATTEMPTS = 2`. Checks, in order: `citation_labels` (only supplied labels), `claim_cited` (every sentence/bullet cited, text non-empty), `support` (one non-streamed validator call judges each claim against its cited passage). Citations are never stripped or rewritten.
 
@@ -265,3 +266,43 @@ Result: `status` `ready_for_synthesis` | `partial_result` | `clarify`; `results`
 Limitations: no LLM planning; the lay-cue rule is a short fixed list and misses other phrasing; at most two calls; adequacy is existence only, not relevance; no memory, re-ranking or automatic routing; no production security or observability.
 
 Commands: see `docs/manual-tests.md` (Story 6.1); offline `uv run pytest tests/test_agentic.py tests/test_smoke.py`.
+
+## MCP integration (Story 7.1)
+
+Two applications share one MongoDB database. The Legal Sections MCP server (`../legal-sections-mcp/`, own design in its `docs/architecture.md`) is a separate read-only process over the `sections` collection, served at `/mcp` over streamable HTTP. This app's `rag-mcp` mode is its only client: `pipeline.retrieve` → `retrieval/mcp_client.py` → MCP call → `QueryResult` → the shared grounded-answer, confidence, citation and streaming paths.
+
+| Allowlisted tool | Used for | Returns |
+|---|---|---|
+| `get_section(act, section_number)` | exact lookup, and step 2 of heading search | one full record or `not_found` |
+| `search_sections_by_heading(act, query, limit)` | heading search | headings only |
+| `get_sections_in_range(act, start, end)` | range lookup | up to 25 full records; absent numbers are simply missing |
+| `list_chapters(act)` | chapter list | chapter number, title, first/last section |
+| `list_sections(act, limit)` | first-N listing | headings only (limit 1-50, default 20) |
+
+Nothing else is ever called; the server's tool list is not used for dispatch.
+
+Trust boundary: the MCP server is a separate process; its output is data, never instructions, and its section text is the only evidence. The server fixes `access_level=public` itself; this app sends no credentials and no scope. A stopped or unreachable server is an error, never a fallback to another mode.
+
+Settings: `MCP_SERVER_URL` (empty → 503 `retrieval_not_ready`), `MCP_DEADLINE_SECONDS` (default 10, valid 1–60, otherwise 503).
+
+Rules, in order: (1) bare section number, several sections or both acts → `clarify`, no call; (2) one act + one integer section → path `exact_lookup`, one `get_section`; (3) one act + a range such as `BNS sections 10 to 19` (checked first; reversed, beyond 1-511, wider than 25 sections, or not exactly one act -> `clarify` with `invalid_range` / `range_too_large` / `ambiguous_request`, no call) -> path `range_lookup`, one `get_sections_in_range`; every returned record must lie inside the range; missing or text-less numbers are named in the message and the status is `partial_result` (`range_partial`), none usable -> `partial_result` (`record_not_found`); (4) one act + one quoted phrase (2–80 chars) and no section → path `heading_search`: `search_sections_by_heading` (limit 5), then `get_section` only for a single match; (5) one act + `chapters` -> path `chapter_list`, one `list_chapters`; one act + `list/show ... sections` (optional `first N`, 1-50) -> path `section_list`, one `list_sections`; both return `status: listing` (headings and chapter data are not statute text, so the message is shown directly and no answer is generated); (6) anything else → `clarify` (`unsupported_question`). At most 2 calls; the deadline bounds each call (`deadline_exceeded` → `clarify`).
+
+| Outcome | `status` | `stop_reason` |
+|---|---|---|
+| section(s) found with text | `ready_for_synthesis` | `evidence_adequate` |
+| chapters / first-N headings listed | `listing` | `listing_returned` |
+| range with gaps | `partial_result` | `range_partial` |
+| no such section / no extractable text / no heading match | `partial_result` | `record_not_found` / `section_text_missing` / `no_heading_match` |
+| invalid or unsupported question, several heading matches, deadline | `clarify` | `bare_section_number`, `ambiguous_request`, `unsupported_question`, `ambiguous_heading`, `invalid_range`, `range_too_large`, `invalid_limit`, `deadline_exceeded` |
+| server unreachable / reports a database error | HTTP 502 `mcp_upstream_error` | — |
+| malformed or unexpected server response | HTTP 502 `mcp_bad_response` | — |
+
+`trace`: `mode`, `validation`, `path`, `steps` (`tool`, `tool_status`, `result_count`), `call_count`, `deadline_seconds`, `elapsed_ms`, `stop_reason`, `caller_id`, `result_count`; never the question, credentials or URL. Passages map to `RetrievedChunk` with `chunk_id = section_id` and `score = 1.0` (exact match).
+
+Limitations: only exact-section, range (at most 25 sections), quoted-heading, chapter-list and first-N listing questions (no paging); no IPC↔BNS mapping; 11 IPC sections (4, 5, 18, 34, 40, 75, 161–165) have no text; no auth, retries, caching or tool discovery; the deadline cancels the call client-side only.
+
+Commands: see `docs/manual-tests.md` (Story 7.1); offline `uv run pytest tests/test_mcp.py tests/test_smoke.py`.
+
+### PDF export (`/pdf`)
+
+Only when the question ends with `/pdf` (e.g. `What do BNS sections 103 to 105 say? /pdf`) does `rag-mcp` build a PDF; otherwise nothing changes. The command is stripped before routing, the normal path runs, and when it produced sections (or a chapter/heading listing) the answer step is skipped: `status: pdf_ready`, `trace.pdf: ready`, and `message` holds a link `PUBLIC_BASE_URL/v1/exports/<id>.pdf`. Nothing to export (clarify, not found) -> normal result, `trace.pdf: skipped`. The PDF holds the question, each section (id, heading, chapter, status, text) and a gap note for partial ranges, built by `export_pdf.py` (pymupdf); no generated answer. PDFs live in memory only (newest 20, unguessable ids, lost on restart) and are served by `GET /v1/exports/{id}.pdf` (404 `export_not_found` otherwise). Setting: `PUBLIC_BASE_URL` (default `http://127.0.0.1:8000`).

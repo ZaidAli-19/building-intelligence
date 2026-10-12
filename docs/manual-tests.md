@@ -343,3 +343,36 @@ console.log(JSON.stringify({status: b.status, path: b.trace.path, stop: b.trace.
 Chat: `rag-agentic` streams DRAFT text, `Evidence check passed — confidence: high` and `Sources:`; non-answer statuses print `message` only.
 
 Offline: `uv run pytest tests/test_smoke.py`
+
+## Story 7.1 — MCP client mode (`rag-mcp`)
+
+Prerequisite: the Legal Sections MCP server running (`cd ../legal-sections-mcp && uv run python -m legal_sections_mcp`, serves `http://127.0.0.1:8765/mcp`) and `.env` with `MCP_SERVER_URL=http://127.0.0.1:8765/mcp` (optional `MCP_DEADLINE_SECONDS`, default 10, valid 1-60). `GENERATION_*` only for `generate_answer`. Pause ~25 s between generation calls.
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"What does BNS section 103 say?","pattern":"mcp","generate_answer":true}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"What does IPC section 4 say?","pattern":"mcp"}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"section 103","pattern":"mcp"}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"Show the BNS section titled \"Murder\"","pattern":"mcp"}'
+curl -s http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"rag-mcp","messages":[{"role":"user","content":"What does BNS section 103 say?"}]}'
+```
+
+Expected, in order: `ready_for_synthesis`, `path: exact_lookup`, `call_count: 1`, `bns:103`, `generation.outcome: answered`; `partial_result`, `record_not_found`, empty `results`; `clarify`, `bare_section_number`, `call_count: 0`; `clarify`, `ambiguous_heading` (several headings match; lists ids only); chat with DRAFT, `Evidence check passed - confidence: high` and `Sources:`.
+
+Range questions: `What do BNS sections 10 to 19 say?` -> `ready_for_synthesis`, `path: range_lookup`, `call_count: 1`, ten ids; `Show IPC sections 1 to 10` -> `partial_result`, `range_partial` (4 and 5 named as missing); `BNS sections 19 to 10` -> `invalid_range`; `BNS sections 1 to 100` -> `range_too_large` (both `call_count: 0`).
+
+Listing questions: `What chapters does the BNS have?` -> `status: listing`, `path: chapter_list`, 20 chapter lines (one `list_chapters` call, no answer step); `List the first 10 IPC sections` -> `listing`, `section_list`, headings only; `List the first 99 BNS sections` -> `invalid_limit`.
+
+Server stopped -> repeat the first curl: HTTP 502 `mcp_upstream_error`. `MCP_SERVER_URL` empty -> HTTP 503 `retrieval_not_ready`. `GET /v1/models` lists eight IDs, ending `rag-mcp`.
+
+Compact view (Postman Scripts -> Post-response):
+
+```js
+const b = pm.response.json(); const t = b.trace || {};
+console.log(JSON.stringify({status: b.status, path: t.path, stop: t.stop_reason, calls: t.call_count,
+  steps: (t.steps || []).map(s => [s.tool, s.tool_status]), ids: (b.results || []).map(r => r.section_id),
+  g: b.generation ? b.generation.outcome : null}));
+```
+
+Offline: `uv run pytest tests/test_mcp.py tests/test_smoke.py`
+
+PDF (only with a trailing `/pdf`): `What do BNS sections 303 to 305 say? /pdf` -> `status: pdf_ready`, message with a `/v1/exports/<id>.pdf` link (open it in a browser); the same question without `/pdf` -> normal answer, no PDF. `section 103 /pdf` -> clarify, `trace.pdf: skipped`. Set `PUBLIC_BASE_URL` if the API is not at `http://127.0.0.1:8000`.

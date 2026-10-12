@@ -291,7 +291,9 @@ def _user_message(question: str, entries: list[dict], prior: list[Issue]) -> str
     return msg
 
 
-def stream_answer(question: str, results: list[RetrievedChunk]) -> Iterator[tuple[str, object]]:
+def stream_answer(
+    question: str, results: list[RetrievedChunk], **context_limits: int,
+) -> Iterator[tuple[str, object]]:
     """Run the single generation/validation operation.
 
     Yields ("notice", str) for labels/status lines, ("text", str) for streamed model text,
@@ -299,7 +301,7 @@ def stream_answer(question: str, results: list[RetrievedChunk]) -> Iterator[tupl
     """
     settings = get_settings()
     started = time.monotonic()
-    entries, omitted, chars = build_context(results)
+    entries, omitted, chars = build_context(results, **context_limits)
     trace: dict = {
         "labels": {e["label"]: e["chunk_id"] for e in entries},
         "selected": len(entries),

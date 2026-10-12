@@ -6,12 +6,14 @@ MAX_PASSAGES = 5
 MAX_CHARS = 12_000
 
 
-def build_context(results: list[RetrievedChunk]) -> tuple[list[dict], int, int]:
+def build_context(
+    results: list[RetrievedChunk], max_passages: int = MAX_PASSAGES, max_chars: int = MAX_CHARS,
+) -> tuple[list[dict], int, int]:
     """Return (entries, omitted_count, total_chars). Passages are never cut mid-text."""
     entries: list[dict] = []
     chars = 0
-    for chunk in results[:MAX_PASSAGES]:
-        if chars + len(chunk.text) > MAX_CHARS:
+    for chunk in results[:max_passages]:
+        if chars + len(chunk.text) > max_chars:
             break
         entries.append({
             "label": f"E{len(entries) + 1}",

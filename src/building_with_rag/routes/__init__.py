@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI
 
-from building_with_rag.routes import chat, health, models, query
+from building_with_rag.routes import chat, export, health, models, query
 
 
 def register_routes(app: FastAPI) -> None:
@@ -10,3 +10,4 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(query.router)
     app.include_router(models.router)
     app.include_router(chat.router)
+    app.include_router(export.router)

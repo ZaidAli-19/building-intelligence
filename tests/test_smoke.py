@@ -18,7 +18,7 @@ def test_healthz(client: TestClient) -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_models_lists_seven(client: TestClient) -> None:
+def test_models_lists_eight(client: TestClient) -> None:
     response = client.get("/v1/models")
     assert response.status_code == 200
     ids = [m["id"] for m in response.json()["data"]]
